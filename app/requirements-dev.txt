@@ -1,0 +1,8 @@
+# Dev/test tooling. Runtime deps live in each service's requirements.txt.
+-r services/storefront/requirements.txt
+-r services/catalog/requirements.txt
+-r services/recs/requirements.txt
+
+pytest>=8.3,<9
+pytest-asyncio>=0.24,<1.2
+ruff>=0.8,<0.15
