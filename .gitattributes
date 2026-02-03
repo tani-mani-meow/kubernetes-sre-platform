@@ -1,0 +1,17 @@
+* text=auto eol=lf
+
+*.sh   text eol=lf
+*.py   text eol=lf
+*.yaml text eol=lf
+*.yml  text eol=lf
+*.json text eol=lf
+*.js   text eol=lf
+*.tf   text eol=lf
+*.sql  text eol=lf
+*.md   text eol=lf
+Makefile     text eol=lf
+Dockerfile   text eol=lf
+
+*.png binary
+*.jpg binary
+*.gif binary

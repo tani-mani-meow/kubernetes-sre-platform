@@ -1,0 +1,30 @@
+# Tooling config for the whole repo: the services, the shared library and the chaos
+# harness are linted and tested together. app/pyproject.toml keeps only the packaging
+# metadata for svc_common.
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = ["**/migrations", ".venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM", "RUF"]
+ignore = [
+    # Pytest fixtures and FastAPI dependencies both legitimately shadow names.
+    "B008",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# The harness tests reach into private helpers on purpose - the report rendering is
+# what produces the evidence, so it is worth asserting on directly.
+"chaos/harness/tests/*" = ["SLF001"]
+
+[tool.pytest.ini_options]
+testpaths = ["app/libs/tests", "app/services", "chaos/harness/tests"]
+# "app/services" on the path makes each service importable by its own name
+# (storefront.main, catalog.store), so all three suites run in one session without the
+# module-name collision a shared src/ layout would cause. "." makes chaos.harness
+# importable the same way the runner does it.
+pythonpath = [".", "app/libs", "app/services"]
+asyncio_mode = "auto"
+addopts = "-q --strict-markers"

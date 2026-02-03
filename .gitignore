@@ -1,0 +1,45 @@
+# secrets / local env
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+kubeconfig*
+!infra/kind/kubeconfig.example
+
+# terraform
+# .terraform.lock.hcl is deliberately NOT ignored: it pins provider hashes so a capture
+# session gets the same providers as the last one. A surprise provider upgrade during a
+# paid, time-boxed session is the worst possible moment to discover a breaking change.
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+crash.log
+crash.*.log
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+dist/
+build/
+
+# chaos harness output (raw runs; curated results are committed under evidence/)
+chaos/harness/out/
+k6-results/
+*.k6.json
+
+# editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
