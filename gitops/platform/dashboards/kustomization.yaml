@@ -1,0 +1,55 @@
+# Wraps the Grafana dashboard JSON in this directory into ConfigMaps the
+# Grafana sidecar will pick up.
+#
+# The JSON files themselves are owned by another agent; this file only defines
+# how they get into the cluster. `kustomize build` fails outright if one is
+# missing, which is the right failure mode — a dashboard silently absent from
+# Grafana is much harder to notice than an Application stuck OutOfSync.
+#
+# The contract with kube-prometheus-stack: its sidecar watches every namespace
+# for ConfigMaps labelled grafana_dashboard=1 (grafana.sidecar.dashboards.label
+# / labelValue in gitops/platform/kube-prometheus-stack/values-*.yaml). Change
+# the label here and dashboards stop appearing, with nothing logged anywhere
+# that says why.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: monitoring
+
+generatorOptions:
+  # Without this, Kustomize appends a content hash to each ConfigMap name.
+  # Editing a dashboard would then rename its ConfigMap, and Argo CD would apply
+  # that as a create-plus-prune rather than an update. The sidecar sees a
+  # deletion followed by an addition, so Grafana drops the dashboard and
+  # re-adds it — the dashboard flickers out of existence mid-sync, and anything
+  # holding a link to it 404s until the new one lands. An in-place update of a
+  # stably-named ConfigMap is a single write the sidecar handles cleanly.
+  disableNameSuffixHash: true
+  labels:
+    grafana_dashboard: "1"
+    app.kubernetes.io/part-of: k8s-slo-platform
+
+# One ConfigMap per dashboard rather than one holding all five. Two reasons:
+# a ConfigMap is capped at ~1MiB and Grafana dashboards with many panels are not
+# small, and a change to slo-overview.json should not rewrite the object that
+# also holds the other four.
+configMapGenerator:
+  - name: dashboard-storefront
+    files:
+      - storefront.json
+
+  - name: dashboard-catalog
+    files:
+      - catalog.json
+
+  - name: dashboard-recs
+    files:
+      - recs.json
+
+  - name: dashboard-platform-overview
+    files:
+      - platform-overview.json
+
+  - name: dashboard-slo-overview
+    files:
+      - slo-overview.json
