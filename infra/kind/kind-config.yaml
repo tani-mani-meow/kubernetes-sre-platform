@@ -1,0 +1,90 @@
+# kind cluster for k8s-slo-platform local development.
+#
+# Requires kind >= v0.33.0 -- the node image digests below were published with that release
+# and are only guaranteed to exist from it.
+#
+# The entire project is built and rehearsed here at zero cost; EKS appears only for short
+# evidence-capture sessions. Anything that cannot be reproduced on this cluster is a
+# scenario that gets debugged for the first time while an EKS control plane bills by the
+# hour, so the topology below imitates the EKS one wherever kind allows it.
+apiVersion: kind.x-k8s.io/v1alpha4
+kind: Cluster
+name: k8s-slo-platform
+
+# Kubernetes 1.34 matches the default kubernetes_version in infra/terraform/variables.tf.
+# Holding both environments on the same minor is what lets a chart that works locally count
+# as evidence rather than coincidence -- API removals between minors are the usual way
+# something green on kind fails on EKS.
+nodes:
+  # The control plane doubles as the ingress node. kind's documented ingress-nginx pattern
+  # is a nodeSelector on ingress-ready plus hostPorts 80/443, and the gitops ingress-nginx
+  # values are written against exactly that pairing; changing either side breaks `make demo`.
+  - role: control-plane
+    image: kindest/node:v1.34.11@sha256:44e222ee2132dab25ff87301682f89eb82c7880ea3a1bf543bfe9708fd08d67d
+    labels:
+      ingress-ready: "true"
+    # Without these the controller listens only inside the node container, and
+    # http://localhost/ from Windows reaches nothing.
+    extraPortMappings:
+      - containerPort: 80
+        hostPort: 80
+        protocol: TCP
+      - containerPort: 443
+        hostPort: 443
+        protocol: TCP
+
+  # Two workers, not one. A node-drain experiment on a single-worker cluster only proves
+  # that pods go Pending; with two, drained pods have somewhere to land and the recovery
+  # time is actually measurable -- which is the number evidence/ exists to record.
+  #
+  # topology.kubernetes.io/zone here is a rehearsal aid and nothing else. There is no fault
+  # isolation: both "zones" are containers on one Docker daemon on one laptop, and losing
+  # the machine loses both. The label exists so the AZ-loss script (cordon + drain every
+  # node carrying a given zone label) can be written, debugged and dry-run locally instead
+  # of during a paid EKS session. On EKS the identical label is set by the cloud provider
+  # and does denote a real availability zone, so the script needs no changes between them.
+  - role: worker
+    image: kindest/node:v1.34.11@sha256:44e222ee2132dab25ff87301682f89eb82c7880ea3a1bf543bfe9708fd08d67d
+    labels:
+      topology.kubernetes.io/zone: kind-a
+  - role: worker
+    image: kindest/node:v1.34.11@sha256:44e222ee2132dab25ff87301682f89eb82c7880ea3a1bf543bfe9708fd08d67d
+    labels:
+      topology.kubernetes.io/zone: kind-b
+
+# -----------------------------------------------------------------------------------------
+# inotify limits -- NOT configurable from this file. Read before the first `kind create`.
+#
+# Grafana, Loki and Promtail each watch large numbers of files. On a three-node kind cluster
+# they exhaust the host's inotify budget and crash-loop with "too many open files", which
+# reads like an application bug and is not one.
+#
+# This cannot be fixed in kind config. kind's v1alpha4 Node schema accepts only role, image,
+# labels, extraMounts, extraPortMappings and kubeadmConfigPatches -- there is no sysctls
+# field. kubeadmConfigPatches configures kubelet and containerdConfigPatches configures
+# containerd; neither touches kernel parameters. fs.inotify.max_user_watches and
+# fs.inotify.max_user_instances are not namespaced, so a kind node container always reads
+# the host's value regardless of what is written here. kind's own known-issues page says to
+# raise the limits on the host, and that is the only correct mechanism.
+#
+# On this machine (Windows 11, Docker Desktop with the WSL2 backend) the relevant "host" is
+# the docker-desktop WSL distro -- not Windows, and not the default Ubuntu distro. From Git
+# Bash, using /proc directly because the docker-desktop image is minimal and may not ship a
+# sysctl binary:
+#
+#     wsl -d docker-desktop -e sh -c 'echo 524288 > /proc/sys/fs/inotify/max_user_watches'
+#     wsl -d docker-desktop -e sh -c 'echo 512    > /proc/sys/fs/inotify/max_user_instances'
+#
+# Verify:
+#
+#     wsl -d docker-desktop -e cat /proc/sys/fs/inotify/max_user_watches
+#
+# That resets when Docker Desktop restarts. To persist it, pass the values as kernel
+# command-line parameters in %USERPROFILE%\.wslconfig and then run `wsl --shutdown`:
+#
+#     [wsl2]
+#     kernelCommandLine = sysctl.fs.inotify.max_user_watches=524288 sysctl.fs.inotify.max_user_instances=512
+#
+# On a Linux host the equivalent is `sudo sysctl fs.inotify.max_user_watches=524288` plus a
+# matching line in /etc/sysctl.conf.
+# -----------------------------------------------------------------------------------------
