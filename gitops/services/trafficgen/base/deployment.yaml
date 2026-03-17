@@ -1,0 +1,106 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: trafficgen
+  labels:
+    app.kubernetes.io/name: trafficgen
+    app.kubernetes.io/part-of: k8s-slo-platform
+    app.kubernetes.io/component: loadgen
+spec:
+  # Exactly one. Replicas multiply the offered rate, and "8 RPS" has to mean 8 RPS or
+  # every SLI comparison across scenarios is against a different denominator.
+  replicas: 1
+  revisionHistoryLimit: 3
+  strategy:
+    # Recreate, not RollingUpdate: a surge would briefly run two generators and double the
+    # load. A few seconds of no traffic during a config change is the cheaper artefact.
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: trafficgen
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: trafficgen
+        app.kubernetes.io/part-of: k8s-slo-platform
+        app.kubernetes.io/component: loadgen
+    spec:
+      # No topologySpreadConstraints: there is one pod, so there is nothing to spread. It
+      # is also the one workload that should NOT be spread away from the services - it is
+      # measuring them, not serving users.
+      securityContext:
+        runAsNonRoot: true
+        # 12345 is the k6 user in grafana/k6. Any non-root uid would work (the binary is
+        # world-executable); using the image's own avoids surprises if k6 ever needs its
+        # home directory.
+        runAsUser: 12345
+        runAsGroup: 12345
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: k6
+          # Pinned, not `latest`. A k6 minor version can change scheduling behaviour or
+          # default timeouts, and a load profile that quietly changes between two evidence
+          # captures makes those captures incomparable.
+          image: grafana/k6:0.49.0
+          imagePullPolicy: IfNotPresent
+          command: ["k6"]
+          # --quiet drops the progress lines k6 emits every few seconds to a non-TTY, and
+          # --no-summary drops the end-of-run report. Over a 30-day run both are pure
+          # noise in Loki, and neither carries information the Prometheus metrics do not.
+          args:
+            - run
+            - --quiet
+            - --no-summary
+            - /scripts/loadtest.js
+          env:
+            - name: STOREFRONT_URL
+              # The in-cluster Service, not the Ingress. Going through ingress-nginx would
+              # fold the ingress controller's own availability into every SLI, and would
+              # make the load generator stop working the moment the Ingress host changes
+              # between kind and EKS.
+              value: http://storefront
+            - name: TARGET_RPS
+              value: "8"
+            - name: K6_NO_USAGE_REPORT
+              # k6 phones home once per run. Harmless, but it is an outbound call from a
+              # cluster that otherwise makes none, and it fails noisily in an air-gapped
+              # or egress-restricted EKS cluster.
+              value: "true"
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+          # No probes. k6 exposes no health endpoint, and its failure mode is exiting -
+          # which the Deployment's restartPolicy already handles. An exec probe on the
+          # process would restate what the kubelet already knows.
+          #
+          # The scenario duration is 30 days; when it elapses k6 exits 0 and the kubelet
+          # restarts the container. That is deliberately not wrapped in
+          # `sh -c 'while true; do k6 run ...; done'`: the shell would be PID 1, k6 would
+          # not receive SIGTERM, and every rollout of this Deployment would sit out the
+          # full termination grace period.
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              # No CPU limit here either, but for a different reason than the services: a
+              # throttled generator silently under-delivers load. The offered rate would
+              # sag exactly when the cluster is busiest - which is when the measurement
+              # matters - and nothing in the metrics would say so.
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+      volumes:
+        - name: scripts
+          configMap:
+            name: trafficgen-script
+        - name: tmp
+          emptyDir: {}

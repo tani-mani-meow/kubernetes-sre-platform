@@ -1,0 +1,35 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: demo
+
+resources:
+  - ../../base
+
+patches:
+  # Only the resource footprint changes between environments. The request rate and traffic
+  # mix stay identical to EKS on purpose: the two capture runs are meant to be compared,
+  # and a different offered load would make every latency percentile and every measured
+  # MTTR incomparable between them.
+  #
+  # No image override: k6 comes from Docker Hub at a pinned tag in both environments, not
+  # from the project's own registry.
+  - target:
+      kind: Deployment
+      name: trafficgen
+    patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: trafficgen
+      spec:
+        template:
+          spec:
+            containers:
+              - name: k6
+                resources:
+                  requests:
+                    cpu: 50m
+                    memory: 96Mi
+                  limits:
+                    memory: 192Mi

@@ -1,0 +1,24 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: demo
+
+resources:
+  - deployment.yaml
+
+configMapGenerator:
+  # The hash matters here more than anywhere else: editing the traffic mix has to restart
+  # k6, because a ConfigMap update alone would leave the old script running for the rest
+  # of a 30-day scenario and the manifests would describe load the cluster is not offering.
+  - name: trafficgen-script
+    files:
+      - scripts/loadtest.js
+
+# No PodMonitor. k6's own metrics would describe the client's view, and mixing a
+# client-side latency series into dashboards fed by server-side SLIs is how you end up
+# debating which number is "real" during an incident review. The authoritative numbers
+# come from the services' /metrics; k6 exists only to make requests happen.
+#
+# No PodDisruptionBudget either: evicting the load generator during a drain is fine and
+# briefly interesting - the gap it leaves in the request stream is visible on the
+# dashboards and makes the drain's start time obvious.

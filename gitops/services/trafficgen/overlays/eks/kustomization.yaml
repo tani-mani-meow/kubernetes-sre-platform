@@ -1,0 +1,32 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: demo
+
+resources:
+  - ../../base
+
+patches:
+  # Same 8 RPS and same mix as kind - see that overlay. The extra headroom is for the VU
+  # pool: when a chaos experiment pushes storefront's latency up, k6 scales toward maxVUs,
+  # and a generator that gets evicted for exceeding its memory limit mid-experiment would
+  # take the traffic away at the exact moment the evidence is being captured.
+  - target:
+      kind: Deployment
+      name: trafficgen
+    patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: trafficgen
+      spec:
+        template:
+          spec:
+            containers:
+              - name: k6
+                resources:
+                  requests:
+                    cpu: 200m
+                    memory: 256Mi
+                  limits:
+                    memory: 512Mi
