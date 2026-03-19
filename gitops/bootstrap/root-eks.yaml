@@ -1,0 +1,42 @@
+# App-of-apps root for the EKS evidence-capture cluster.
+#
+# Identical to root-kind.yaml except for the path it watches. The two roots are
+# separate files rather than one parameterised template because they are applied
+# to different clusters at different times, and an accidental `kubectl apply` of
+# the wrong one should fail obviously rather than quietly retarget a cluster.
+#
+# See root-kind.yaml for the reasoning behind the directory source type, the
+# finalizer and the manifest-generate-paths annotation.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: root-eks
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  annotations:
+    argocd.argoproj.io/manifest-generate-paths: /gitops/clusters/eks/apps
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/tani-mani-meow/k8s-slo-platform.git
+    targetRevision: main
+    path: gitops/clusters/eks/apps
+    directory:
+      recurse: false
+      include: "*.yaml"
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false
+    retry:
+      limit: 5
+      backoff:
+        duration: 15s
+        factor: 2
+        maxDuration: 3m

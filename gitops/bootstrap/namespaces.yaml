@@ -1,0 +1,62 @@
+# Namespaces, applied by `make bootstrap` alongside the Argo CD install.
+#
+# Every Application in gitops/clusters/*/apps also carries CreateNamespace=true,
+# so this file is not strictly required for the cluster to come up. It exists
+# because a namespace Argo CD auto-creates is bare: no part-of label, no Pod
+# Security Admission level. Both matter here — the PSA levels below are what stop
+# a `restricted` default (EKS clusters that opt into it) from silently refusing
+# the privileged chaos-daemon and node-exporter pods.
+#
+# `argocd` is absent on purpose: `helm install --create-namespace` owns it.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: demo
+  labels:
+    app.kubernetes.io/part-of: k8s-slo-platform
+    # baseline, not restricted: the service manifests are owned by another agent
+    # and enforcing `restricted` from here could reject their pods for a missing
+    # seccompProfile. warn/audit surfaces the gap without breaking the demo.
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+  labels:
+    app.kubernetes.io/part-of: k8s-slo-platform
+    # node-exporter runs with hostNetwork and hostPID to read the host's /proc.
+    # baseline forbids both, so this namespace has to be privileged.
+    pod-security.kubernetes.io/enforce: privileged
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ingress-nginx
+  labels:
+    app.kubernetes.io/part-of: k8s-slo-platform
+    # On kind the controller binds hostPort 80/443 on the control-plane node,
+    # which baseline disallows. EKS uses a LoadBalancer Service and would be fine
+    # at baseline, but one shared file beats two that differ in a single label.
+    pod-security.kubernetes.io/enforce: privileged
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: argo-rollouts
+  labels:
+    app.kubernetes.io/part-of: k8s-slo-platform
+    pod-security.kubernetes.io/enforce: baseline
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: chaos-mesh
+  labels:
+    app.kubernetes.io/part-of: k8s-slo-platform
+    # chaos-daemon mounts the container runtime socket and enters other pods'
+    # network namespaces. That is the whole point of it, and it needs privileged.
+    pod-security.kubernetes.io/enforce: privileged

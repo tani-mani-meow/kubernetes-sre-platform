@@ -1,0 +1,125 @@
+# Helm values for the argo-cd chart.
+#
+# Argo CD is the ONE component not managed by GitOps — `make bootstrap` runs
+# `helm install argocd argo/argo-cd -n argocd --create-namespace -f this-file`.
+# Something has to apply the first manifest, and a controller cannot install
+# itself. Everything after this point is reconciled from Git by the root
+# Application in root-kind.yaml / root-eks.yaml.
+#
+# Chart: argo-cd 10.4.3 (argoproj.github.io/argo-helm)
+#
+# Both kind and EKS use this same file. The EKS clusters in this project are
+# short-lived evidence-capture sessions reached by `kubectl port-forward`, never
+# by a public ingress, so the kind tuning below is not a compromise there.
+
+global:
+  # Only ever rendered into ingress//redirect URLs, and we create no Ingress for
+  # Argo CD. Set so the chart does not emit its argocd.example.com placeholder.
+  domain: argocd.localhost
+
+crds:
+  install: true
+  # Uninstalling the chart must not garbage-collect the Application CRs it is
+  # currently reconciling — that would delete every workload in the cluster.
+  keep: true
+
+configs:
+  params:
+    # We reach the UI with `kubectl port-forward svc/argocd-server 8080:80`.
+    # Without this the server serves TLS on that port too and terminates its own
+    # HTTPS behind the forward, producing a redirect loop in the browser.
+    # This is safe only because the server is never exposed off-cluster.
+    server.insecure: true
+
+    # Default is 5s. The drift-detection demo does `kubectl edit deploy/...` and
+    # times how long Argo CD takes to revert it; 5s of dead air is fine on a
+    # recording but 2s reads better and costs nothing at this cluster size.
+    controller.self.heal.timeout.seconds: 2
+
+  cm:
+    # No webhook can reach a kind cluster behind a home NAT, so Argo CD only
+    # learns about commits by polling. 180s (the default) means `make demo`
+    # spends up to three minutes looking idle after a push.
+    timeout.reconciliation: 60s
+    timeout.reconciliation.jitter: 10s
+
+    # Track ownership with an annotation instead of the app.kubernetes.io/instance
+    # label. The label form would collide with the workload labels fixed in
+    # docs/conventions.md and is truncated at 63 characters.
+    application.resourceTrackingMethod: annotation
+
+    # Argo CD's built-in health check for a Rollout is provided by a Lua script
+    # that ships with the server, so canary progress shows in the UI without
+    # extra config. Listed here only as a reminder of where it would go if the
+    # bundled script ever needs overriding.
+    # resource.customizations.health.argoproj.io_Rollout: |
+
+# --- Single-instance sizing -------------------------------------------------
+# No HA: one replica of everything, no redis-ha subchart, no PodDisruptionBudgets.
+# A kind cluster has one control-plane and two workers on a laptop; three Redis
+# sentinels and two of each controller would consume the headroom the observability
+# stack needs.
+#
+# Memory limits are set, CPU limits are deliberately not. A CPU limit on the
+# application controller causes CFS throttling during the initial sync of ~14
+# Applications, which shows up as apps sitting in "Progressing" for minutes.
+
+controller:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 1Gi
+
+repoServer:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 50m
+      memory: 192Mi
+    limits:
+      # The repo-server renders every Helm chart in gitops/clusters/*/apps,
+      # including kube-prometheus-stack. That template alone is tens of MB of
+      # CRDs; 256Mi gets it OOMKilled mid-render.
+      memory: 768Mi
+
+server:
+  replicas: 1
+  # ClusterIP (the chart default) — port-forwarded, never exposed.
+  service:
+    type: ClusterIP
+  resources:
+    requests:
+      cpu: 25m
+      memory: 64Mi
+    limits:
+      memory: 256Mi
+
+redis:
+  enabled: true
+  resources:
+    requests:
+      cpu: 25m
+      memory: 64Mi
+    limits:
+      memory: 192Mi
+
+# --- Components we do not use ----------------------------------------------
+
+dex:
+  # No SSO. The only login is the bootstrap admin account, whose password lands
+  # in the argocd-initial-admin-secret Secret.
+  enabled: false
+
+applicationSet:
+  # The app-of-apps pattern is enough for 14 hand-written Applications across
+  # two clusters. An ApplicationSet generator would add indirection without
+  # removing a file.
+  enabled: false
+
+notifications:
+  # Nothing to notify. Alert delivery in this project is Alertmanager's job and
+  # is part of the evidence; Argo CD sync notifications are not.
+  enabled: false

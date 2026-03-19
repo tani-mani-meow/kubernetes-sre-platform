@@ -1,0 +1,52 @@
+# App-of-apps root for the kind cluster.
+#
+# Applied once by `make bootstrap` after the Argo CD Helm release is up. It owns
+# nothing but the Application manifests in gitops/clusters/kind/apps, each of
+# which owns a real component. That is the whole GitOps entry point: one
+# `kubectl apply` of this file and the cluster converges.
+#
+# Deliberately NOT a Kustomize app. gitops/clusters/kind/apps contains no
+# kustomization.yaml, so Argo CD treats it as a plain directory source and picks
+# up any *.yaml dropped in. Adding a kustomization.yaml there would switch the
+# source type and force every new Application to be listed twice.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: root-kind
+  namespace: argocd
+  finalizers:
+    # Deleting the root cascades to the child Applications and their workloads.
+    # Without it, `kubectl delete app root-kind` orphans the entire cluster.
+    - resources-finalizer.argocd.argoproj.io
+  annotations:
+    # A commit touching only app/ or docs/ should not make the repo-server
+    # re-render 14 charts. Leading slash = relative to repo root.
+    argocd.argoproj.io/manifest-generate-paths: /gitops/clusters/kind/apps
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/tani-mani-meow/k8s-slo-platform.git
+    targetRevision: main
+    path: gitops/clusters/kind/apps
+    directory:
+      recurse: false
+      include: "*.yaml"
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      # selfHeal here means `kubectl delete application/loki` is reverted, not
+      # just detected. The child apps are as much part of desired state as the
+      # pods they create.
+      selfHeal: true
+    syncOptions:
+      # argocd already exists — the Helm install created it.
+      - CreateNamespace=false
+    retry:
+      limit: 5
+      backoff:
+        duration: 15s
+        factor: 2
+        maxDuration: 3m
