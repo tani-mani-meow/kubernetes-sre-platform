@@ -1,0 +1,148 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/part-of: k8s-slo-platform
+    app.kubernetes.io/component: database
+spec:
+  serviceName: postgres-headless
+  # One replica. This is the platform's deliberate single point of failure: the
+  # "database pod killed" scenario is only interesting because catalog has nowhere else
+  # to go, and replication would need an operator (see planning.md - CloudNativePG was
+  # considered and rejected: it would add a subsystem that produces no extra evidence).
+  replicas: 1
+  # StatefulSet rather than Deployment for the at-most-one guarantee: the replacement pod
+  # is not started until postgres-0 is fully terminated. A Deployment's surge would briefly
+  # run two postgres processes against one data directory, which is a corrupted database,
+  # not a rollout.
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: postgres
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: postgres
+        app.kubernetes.io/part-of: k8s-slo-platform
+        app.kubernetes.io/component: database
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        # uid/gid 70 is the `postgres` user in the *alpine* image (the Debian variant uses
+        # 999). Pinned numerically so runAsNonRoot can be enforced without name lookup;
+        # it must be revisited if the image variant ever changes.
+        runAsUser: 70
+        runAsGroup: 70
+        # Without fsGroup the PVC arrives owned by root and initdb cannot write to it.
+        # This is also why PGDATA below is a *subdirectory* of the mount: fsGroup makes
+        # the volume root group-writable (0775 + setgid), and initdb refuses to use a data
+        # directory with group or world permissions. A subdirectory created by initdb
+        # itself gets 0700 and inherits the group from the setgid bit, which satisfies
+        # both requirements.
+        fsGroup: 70
+        # OnRootMismatch skips a recursive chown of the whole volume on every restart.
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      # Longer than the app services: a fast shutdown has to flush a checkpoint first.
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: postgresql
+              containerPort: 5432
+              protocol: TCP
+          envFrom:
+            - secretRef:
+                name: postgres-credentials
+          env:
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            # readOnlyRootFilesystem is on, so every path the image writes to needs a
+            # volume. postgres only writes to three: PGDATA (the PVC), the unix socket
+            # directory, and /tmp - which the entrypoint uses for the temporary
+            # single-user server it runs during first-boot initialisation.
+            - name: run
+              mountPath: /var/run/postgresql
+            - name: tmp
+              mountPath: /tmp
+          # pg_isready over TCP, not a unix socket: it answers the question catalog
+          # actually asks ("can I connect over the network"), and it correctly reports
+          # not-ready during first boot, when the entrypoint runs an initialisation
+          # server with listen_addresses='' that a socket check would happily accept.
+          startupProbe:
+            exec:
+              command: ["pg_isready", "-h", "127.0.0.1", "-p", "5432", "-t", "3"]
+            periodSeconds: 5
+            # 150s. initdb plus the seed on a kind node's local-path volume is slow, and
+            # a startupProbe that gives up restarts the pod mid-initdb - which can leave a
+            # half-built data directory that never recovers on its own.
+            failureThreshold: 30
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-h", "127.0.0.1", "-p", "5432", "-t", "3"]
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-h", "127.0.0.1", "-p", "5432", "-t", "3"]
+            periodSeconds: 15
+            timeoutSeconds: 5
+            # ~90s of consecutive failures before a restart, against readiness' ~30s.
+            # Restarting postgres because it is briefly busy would convert a slow query
+            # into crash recovery, and crash recovery is what makes the measured MTTR for
+            # the database scenario jump around between runs.
+            failureThreshold: 6
+          lifecycle:
+            preStop:
+              exec:
+                # A bare SIGTERM to the postgres server means "smart shutdown": wait for
+                # every client session to disconnect. catalog holds a pooled connection
+                # open indefinitely, so that would stall until the grace period expires
+                # and the container is SIGKILLed - leaving an unclean shutdown and forcing
+                # WAL recovery on the next start. `-m fast` disconnects clients and
+                # checkpoints, so a planned restart stays a planned restart.
+                command: ["sh", "-c", "pg_ctl stop -D \"$PGDATA\" -m fast -w -t 45"]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              # No CPU limit, for the same reason as the services it backs: catalog's
+              # 200ms latency SLO is measured end to end, and throttling postgres would
+              # show up as catalog latency with no way to tell the two apart on a
+              # dashboard.
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+      volumes:
+        - name: run
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          app.kubernetes.io/name: postgres
+          app.kubernetes.io/part-of: k8s-slo-platform
+          app.kubernetes.io/component: database
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            # Twelve products and however many orders the load generator writes in an
+            # afternoon. 2Gi is already generous; the overlays set the storage class.
+            storage: 2Gi

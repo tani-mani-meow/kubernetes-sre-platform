@@ -1,0 +1,49 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: demo
+
+resources:
+  - ../../base
+
+patches:
+  # gp3, not gp2: same price class, but gp3 gives a fixed 3000 IOPS / 125 MB/s at any size,
+  # so a 10Gi volume is not throttled to the ~30 IOPS a small gp2 volume would get. A
+  # database whose disk is IOPS-starved would put a latency floor under catalog's 200ms
+  # SLO that has nothing to do with the code being measured.
+  #
+  # Requires a StorageClass named `gp3` and the EBS CSI driver - both provisioned by the
+  # Terraform in infra/.
+  #
+  # gp3 volumes are zonal, which is the EKS version of kind's local-path constraint: the
+  # postgres pod can only be scheduled in the AZ that holds its volume.
+  - target:
+      kind: StatefulSet
+      name: postgres
+    patch: |
+      - op: add
+        path: /spec/volumeClaimTemplates/0/spec/storageClassName
+        value: gp3
+      - op: replace
+        path: /spec/volumeClaimTemplates/0/spec/resources/requests/storage
+        value: 10Gi
+
+  - target:
+      kind: StatefulSet
+      name: postgres
+    patch: |
+      apiVersion: apps/v1
+      kind: StatefulSet
+      metadata:
+        name: postgres
+      spec:
+        template:
+          spec:
+            containers:
+              - name: postgres
+                resources:
+                  requests:
+                    cpu: 250m
+                    memory: 512Mi
+                  limits:
+                    memory: 1Gi

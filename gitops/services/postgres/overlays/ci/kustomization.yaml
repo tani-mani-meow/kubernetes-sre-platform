@@ -1,0 +1,35 @@
+# Applied by the e2e job with `kubectl apply -k`, no Argo CD. The seed Job's PostSync
+# annotations are inert under plain kubectl, which is why the Job's container waits for
+# postgres itself instead of relying on Argo's hook ordering.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: demo
+
+resources:
+  - ../../base
+
+patches:
+  # emptyDir instead of a PVC. The e2e cluster is created and destroyed inside one job, so
+  # there is nothing for a volume to outlive - and on a GitHub runner a dynamic PVC is a
+  # provisioner that has to be installed and waited on before anything else can start.
+  #
+  # This also removes a class of confusing CI failure: with a PVC, a re-run that reuses a
+  # cluster would find an already-initialised data directory and skip initdb, so a change
+  # to POSTGRES_USER or POSTGRES_DB would appear to work locally and fail in CI (or the
+  # reverse). emptyDir means every run starts from initdb.
+  #
+  # JSON patch: `volumeClaimTemplates` is immutable on a live StatefulSet and has no merge
+  # key, so removing it wholesale is the only correct edit. Safe here precisely because
+  # the StatefulSet is always created fresh.
+  - target:
+      kind: StatefulSet
+      name: postgres
+    patch: |
+      - op: remove
+        path: /spec/volumeClaimTemplates
+      - op: add
+        path: /spec/template/spec/volumes/-
+        value:
+          name: data
+          emptyDir: {}

@@ -1,0 +1,63 @@
+# Applied by the e2e job with `kubectl apply -k`, no Argo CD. catalog is the service the
+# e2e job cares about most: it is the only one that would pass its unit tests against the
+# in-memory store while being broken against a real Postgres.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: demo
+
+resources:
+  - ../../base
+
+images:
+  - name: ghcr.io/tani-mani-meow/k8s-slo-platform/catalog
+    newTag: local
+
+replicas:
+  - name: catalog
+    count: 1
+
+configMapGenerator:
+  - name: catalog-config
+    behavior: merge
+    literals:
+      # No collector in the e2e cluster; the exporter's retries would otherwise be charged
+      # to the request latency the test measures.
+      - OTEL_SDK_DISABLED=true
+      # Restated so a fault deliberately committed into the base for a demo cannot fail
+      # an unrelated pull request's e2e run.
+      - FAULT_ERROR_RATE=0.0
+      - FAULT_LATENCY_MS=0
+
+patches:
+  # No prometheus-operator CRDs in the e2e cluster, and an unknown kind fails the entire
+  # `kubectl apply -k` rather than just its own object.
+  - target:
+      kind: PodMonitor
+      name: catalog
+    patch: |
+      $patch: delete
+      apiVersion: monitoring.coreos.com/v1
+      kind: PodMonitor
+      metadata:
+        name: catalog
+
+  - target:
+      kind: Deployment
+      name: catalog
+    patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: catalog
+      spec:
+        template:
+          spec:
+            containers:
+              - name: catalog
+                resources:
+                  requests:
+                    cpu: 25m
+                    memory: 96Mi
+                  limits:
+                    memory: 192Mi

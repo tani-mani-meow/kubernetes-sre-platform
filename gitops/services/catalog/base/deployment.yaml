@@ -1,0 +1,165 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: catalog
+  labels:
+    app.kubernetes.io/name: catalog
+    app.kubernetes.io/part-of: k8s-slo-platform
+    app.kubernetes.io/component: api
+spec:
+  # Two replicas so a single pod kill is absorbed and the pod-kill scenario produces a
+  # latency blip rather than 5xx - a distinct evidence artefact from the postgres kill,
+  # which takes every catalog replica NotReady at once no matter how many there are.
+  replicas: 2
+  revisionHistoryLimit: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # See storefront: a deploy that halves capacity would burn budget for a routine
+      # event. Also relevant here because each new pod opens a fresh asyncpg pool.
+      maxUnavailable: 0
+      maxSurge: 1
+  progressDeadlineSeconds: 300
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: catalog
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: catalog
+        app.kubernetes.io/part-of: k8s-slo-platform
+        app.kubernetes.io/component: api
+    spec:
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: catalog
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      terminationGracePeriodSeconds: 30
+      initContainers:
+        # catalog's lifespan startup calls asyncpg.create_pool(min_size=2), which connects
+        # eagerly and raises if postgres is not there yet - the pod exits and enters
+        # CrashLoopBackOff. It does recover, but kubelet backoff reaches 5 minutes, so a
+        # fresh cluster spends several minutes with catalog down for no reason and the CI
+        # e2e job flakes on `kubectl rollout status`. Waiting here turns that into a
+        # deterministic few seconds.
+        #
+        # Same image as the postgres StatefulSet so the node has it cached already.
+        - name: wait-for-postgres
+          image: postgres:16-alpine
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - until pg_isready -h postgres -p 5432 -t 3; do sleep 2; done
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+      containers:
+        - name: catalog
+          image: ghcr.io/tani-mani-meow/k8s-slo-platform/catalog:local
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: catalog-config
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: k8s.pod.name=$(POD_NAME),k8s.namespace.name=$(POD_NAMESPACE)
+            # The DSN is the one value that is a credential, so it comes from a Secret
+            # rather than the ConfigMap the rest of the config lives in.
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: catalog-db
+                  key: DATABASE_URL
+          # catalog is the only service whose /readyz depends on something external, so
+          # the split matters most here. readyz pings the pool: when postgres goes away
+          # every replica leaves the Service within ~10s and storefront's dependency
+          # metrics show it immediately. healthz stays 200 the whole time, which is the
+          # point - restarting catalog during a database outage would add cold pools and
+          # a fresh CrashLoopBackOff on top of an incident, and the restarts would blur
+          # the recovery time the experiment is trying to measure.
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 3
+            failureThreshold: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 2
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          lifecycle:
+            preStop:
+              exec:
+                # Endpoint removal races container SIGTERM; without the pause, storefront
+                # keeps dialling a pod that has already closed its pool and the resulting
+                # 503s land in storefront's SLI on every rollout.
+                command: ["/bin/sleep", "5"]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              # No CPU limit: catalog carries the tightest latency SLO in the platform
+              # (99% under 200ms) and CFS throttling would make that SLO a measurement of
+              # the limit rather than of the service or its database.
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            # readOnlyRootFilesystem with nowhere writable is a startup failure waiting
+            # for the first library that calls tempfile. Nothing here writes to disk
+            # today - PYTHONDONTWRITEBYTECODE is set and no handler touches the
+            # filesystem - but the cost of being wrong is a CrashLoopBackOff discovered
+            # during a capture session, and the cost of this is 64Mi of tmpfs.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Mi

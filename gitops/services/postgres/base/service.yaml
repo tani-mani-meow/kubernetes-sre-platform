@@ -1,0 +1,51 @@
+# Two Services, because they answer two different questions.
+#
+# `postgres-headless` exists only to satisfy StatefulSet.spec.serviceName: it is what
+# gives the pod its stable DNS identity (postgres-0.postgres-headless). Nothing connects
+# to it.
+#
+# `postgres` is the ClusterIP every client uses. Pointing DATABASE_URL at the headless
+# name would work today with one replica, but it would resolve straight to a pod IP: on a
+# pod kill, clients keep the dead IP until the DNS record expires and their cached
+# connections fail, which adds seconds of connection-refused to the measured MTTR that
+# have nothing to do with how long postgres took to come back. A ClusterIP is a stable
+# VIP that kube-proxy repoints the moment the endpoint changes.
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-headless
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/part-of: k8s-slo-platform
+    app.kubernetes.io/component: database
+spec:
+  clusterIP: None
+  # Standard for a StatefulSet's governing Service: pod identity must resolve before the
+  # pod is ready, or the pod cannot bootstrap itself. Safe here precisely because nothing
+  # connects to this name.
+  publishNotReadyAddresses: true
+  selector:
+    app.kubernetes.io/name: postgres
+  ports:
+    - name: postgresql
+      port: 5432
+      targetPort: postgresql
+      protocol: TCP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/part-of: k8s-slo-platform
+    app.kubernetes.io/component: database
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: postgres
+  ports:
+    - name: postgresql
+      port: 5432
+      targetPort: postgresql
+      protocol: TCP

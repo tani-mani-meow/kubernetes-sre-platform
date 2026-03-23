@@ -1,0 +1,38 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: demo
+
+resources:
+  - statefulset.yaml
+  - service.yaml
+  - secret.yaml
+  - seed-job.yaml
+
+configMapGenerator:
+  # sql/ is a byte-for-byte mirror of app/services/catalog/migrations/. It has to be a
+  # copy: configMapGenerator refuses paths outside the kustomization root, and the two
+  # ways around that are both worse than the copy. `--load-restrictor
+  # LoadRestrictionsNone` has to be enabled cluster-wide in Argo CD's kustomize build
+  # options and disables the guard for every Application at once; a symlink hits the same
+  # restrictor after resolution, and does not survive a Windows checkout.
+  #
+  # Direction of truth: app/services/catalog/migrations/ is the source. That is where a
+  # developer changing the schema looks, it is what app/services/catalog/store.py mirrors
+  # in its in-memory test double, and 001_schema.sql's own header points back at this Job.
+  # This directory is the derived copy.
+  #
+  # Drift is prevented by checking, not by hoping: the two directories must be compared in
+  # CI (`diff -r app/services/catalog/migrations gitops/services/postgres/base/sql`) and
+  # refreshed by a `make sync-sql` target. Without that gate the failure is silent -
+  # catalog gets a column the cluster's database has never heard of, and it surfaces as
+  # 500s at runtime rather than as a red build.
+  - name: postgres-sql
+    files:
+      - sql/001_schema.sql
+      - sql/002_seed.sql
+
+# No PodDisruptionBudget here, unlike the three services. At one replica any PDB is either
+# a no-op (maxUnavailable: 1) or a permanent block on `kubectl drain` (minAvailable: 1),
+# and the node-drain experiment needs the drain to actually complete. The database's
+# unavailability during a drain is the finding, not an accident to be budgeted around.

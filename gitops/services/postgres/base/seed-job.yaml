@@ -1,0 +1,121 @@
+# Schema + demo data, re-applied on every Argo CD sync.
+#
+# Why an Argo hook rather than a plain Job with generateName:
+#   - A Job's spec is immutable. Re-applying a fixed-name plain Job on the next sync fails
+#     with "field is immutable" and the Application sits Degraded until someone deletes
+#     the Job by hand. That is a trap, not a workflow.
+#   - generateName avoids the immutability problem but leaves one untracked Job per sync
+#     accumulating in the namespace, and it destroys the stable name the CI e2e job needs
+#     for `kubectl wait --for=condition=complete job/postgres-seed`.
+#   - hook-delete-policy: BeforeHookCreation deletes the previous run immediately before
+#     starting the next one. The name stays stable, exactly one Job exists at a time, and
+#     the last run's logs stay readable right up until the next sync - which is when you
+#     want them.
+#   - PostSync also buys ordering for free: Argo runs the hook only once the StatefulSet
+#     reports Healthy, so the wait loop below is usually a no-op under Argo.
+#
+# The CI overlay applies this with plain `kubectl apply -k` and no Argo CD. The
+# annotations are inert there, so the container waits for postgres itself; CI builds a
+# fresh cluster each run, so the immutability problem never arises.
+#
+# Idempotency is the SQL's job, not this Job's: 001 is CREATE ... IF NOT EXISTS, 002 is
+# INSERT ... ON CONFLICT DO UPDATE. Re-running it is the normal case (it is also how a
+# long-running demo cluster gets its stock topped up).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: postgres-seed
+  labels:
+    app.kubernetes.io/name: postgres-seed
+    app.kubernetes.io/part-of: k8s-slo-platform
+    app.kubernetes.io/component: database
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 6
+  template:
+    metadata:
+      labels:
+        # Deliberately NOT `app.kubernetes.io/name: postgres`. Both postgres Services
+        # select on that label alone, so a seed pod carrying it would be added to the
+        # database's Endpoints and catalog's connections would be load-balanced into a
+        # psql container.
+        app.kubernetes.io/name: postgres-seed
+        app.kubernetes.io/part-of: k8s-slo-platform
+        app.kubernetes.io/component: database
+    spec:
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 70
+        runAsGroup: 70
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: psql
+          image: postgres:16-alpine
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              until pg_isready -t 3; do
+                echo "waiting for postgres"
+                sleep 2
+              done
+              for f in /sql/*.sql; do
+                echo "applying ${f}"
+                # ON_ERROR_STOP so a broken migration fails the Job instead of logging an
+                # error and exiting 0; --single-transaction so a partial file never lands.
+                psql -v ON_ERROR_STOP=1 --single-transaction -f "${f}"
+              done
+              echo "seed complete"
+          env:
+            # libpq's own variables, so the command line stays free of credentials.
+            - name: PGHOST
+              value: postgres
+            - name: PGPORT
+              value: "5432"
+            - name: PGUSER
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: POSTGRES_USER
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: POSTGRES_PASSWORD
+            - name: PGDATABASE
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: POSTGRES_DB
+          volumeMounts:
+            - name: sql
+              mountPath: /sql
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+      volumes:
+        - name: sql
+          configMap:
+            # Name rewritten by kustomize to the hashed name from configMapGenerator, so
+            # editing the SQL produces a new ConfigMap and a Job that mounts it.
+            name: postgres-sql
+        - name: tmp
+          emptyDir: {}

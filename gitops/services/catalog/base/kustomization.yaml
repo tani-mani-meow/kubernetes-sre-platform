@@ -1,0 +1,45 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: demo
+
+resources:
+  - deployment.yaml
+  - service.yaml
+  - podmonitor.yaml
+  - pdb.yaml
+
+configMapGenerator:
+  - name: catalog-config
+    literals:
+      - SERVICE_NAME=catalog
+      - LOG_LEVEL=INFO
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector.monitoring:4318
+      # See storefront: FAULT_LATENCY_RATE is 1.0 per docs/conventions.md, and is inert
+      # while FAULT_LATENCY_MS is 0.
+      - FAULT_ERROR_RATE=0.0
+      - FAULT_LATENCY_MS=0
+      - FAULT_LATENCY_RATE=1.0
+
+secretGenerator:
+  # A demo credential committed to a public repo, on purpose and with eyes open. The
+  # database it protects holds twelve rows of made-up desk accessories and is destroyed
+  # with the cluster. A real deployment would source this from External Secrets (EKS:
+  # Secrets Manager via IRSA) and the manifest would carry only a reference - which is
+  # exactly one more subsystem than this project needs to produce SLO evidence, so it is
+  # recorded in planning.md as "considered, rejected" rather than half-built.
+  #
+  # This DSN is duplicated in gitops/services/postgres/base/secret.yaml, which is where
+  # postgres gets the matching POSTGRES_USER/PASSWORD/DB. They must be changed together:
+  # each service is its own Argo CD Application and cannot reference the other's objects
+  # without pulling the whole StatefulSet into catalog's app. Changing one and not the
+  # other shows up as catalog stuck NotReady with an auth failure in its logs.
+  #
+  # Host is the short name, not an FQDN, so it resolves through the pod's DNS search path
+  # in whatever namespace this is applied to.
+  - name: catalog-db
+    literals:
+      - DATABASE_URL=postgresql://catalog:demo-not-a-secret@postgres:5432/catalog
+
+# Hashes stay on for both generators: a credential rotation or a fault-rate commit has to
+# reach running pods, and only a pod-template change does that.

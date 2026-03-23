@@ -1,0 +1,29 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: demo
+
+resources:
+  - ../../base
+
+patches:
+  # `standard` is kind's built-in local-path provisioner. Naming it explicitly rather than
+  # relying on the default StorageClass keeps the manifest honest about what it needs, and
+  # it fails at PVC-creation time rather than leaving a pod Pending with no obvious cause
+  # if someone runs this against a cluster that has no default class.
+  #
+  # Local-path means the volume is pinned to whichever node the pod first landed on. That
+  # is a real constraint for the node-drain experiment: postgres cannot move, so draining
+  # its node takes the database down. That is a finding worth capturing, not a bug to
+  # engineer around on a laptop.
+  #
+  # JSON patch rather than a strategic merge: volumeClaimTemplates has no merge key, so a
+  # partial merge patch would replace the whole list and silently drop accessModes and the
+  # storage request.
+  - target:
+      kind: StatefulSet
+      name: postgres
+    patch: |
+      - op: add
+        path: /spec/volumeClaimTemplates/0/spec/storageClassName
+        value: standard
