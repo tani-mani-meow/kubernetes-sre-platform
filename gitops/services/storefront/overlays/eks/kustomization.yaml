@@ -1,0 +1,37 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: demo
+
+resources:
+  - ../../base
+
+images:
+  # `sha-placeholder` is a marker, not a tag that exists. The release workflow runs
+  # `kustomize edit set image .../storefront=...:sha-<short-sha>` here and commits the
+  # result, which is the change Argo CD syncs. A tag that cannot resolve is the point:
+  # if the rewrite ever fails to run, the deploy fails loudly at ImagePullBackOff instead
+  # of silently redeploying whatever `latest` happens to be.
+  - name: ghcr.io/tani-mani-meow/k8s-slo-platform/storefront
+    newTag: sha-placeholder
+
+patches:
+  # Real nodes, and this is the environment the evidence is captured in. Requests are
+  # sized so the scheduler keeps the two replicas on separate nodes without the
+  # topologySpreadConstraint having to fall back to ScheduleAnyway.
+  #
+  # JSON6902, not a strategic merge patch: Rollout is a CRD, so kustomize has no merge
+  # key for `containers` and would replace the list rather than merge into it, leaving a
+  # container with no image. See the same note in the kind overlay.
+  - target:
+      kind: Rollout
+      name: storefront
+    patch: |
+      - op: replace
+        path: /spec/template/spec/containers/0/resources
+        value:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            memory: 512Mi

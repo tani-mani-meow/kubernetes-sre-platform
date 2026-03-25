@@ -1,0 +1,44 @@
+# The only route into the cluster. storefront owns it because storefront is the only
+# service a customer talks to; catalog and recs are reachable only from inside `demo`.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: storefront
+  labels:
+    app.kubernetes.io/name: storefront
+    app.kubernetes.io/part-of: k8s-slo-platform
+    app.kubernetes.io/component: api
+spec:
+  ingressClassName: nginx
+  rules:
+    # No host in the base: the rule matches any Host header, which is what EKS needs
+    # because the load balancer's DNS name is not known until the controller creates it.
+    # The kind overlay pins `localhost`.
+    - http:
+        paths:
+          # A path allowlist, not `/`. docs/conventions.md requires that
+          # `/internal/faults` is never reachable through the Ingress, and a `/` prefix
+          # would publish it (plus /healthz, /readyz and /metrics) to anything that can
+          # reach the load balancer. The obvious alternative - a `/` rule plus an nginx
+          # `server-snippet` denying /internal - does not work by default: ingress-nginx
+          # ships with `allow-snippet-annotations: false` since 1.9. Two prefixes cover
+          # the entire customer-facing API (`/products`, `/products/{id}`, `/orders`), so
+          # the allowlist costs nothing.
+          #
+          # It also matters for the demo's integrity: anyone who could reach
+          # `PUT /internal/faults` from outside could dial in the exact failure the
+          # evidence claims was injected under controlled conditions.
+          - path: /products
+            pathType: Prefix
+            backend:
+              service:
+                name: storefront
+                port:
+                  name: http
+          - path: /orders
+            pathType: Prefix
+            backend:
+              service:
+                name: storefront
+                port:
+                  name: http

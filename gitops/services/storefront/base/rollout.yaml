@@ -1,0 +1,202 @@
+# storefront as an Argo Rollout.
+#
+# Replaces the Deployment this file grew out of; both must never exist at once, because
+# two controllers publishing pods into the same Service would make the canary weight
+# whatever the two happened to add up to.
+#
+# Replica-weighted canary, no service mesh. With 4 replicas, "25%" is one canary pod and
+# three stable ones, and the Service load-balances across all four. That is coarser than
+# mesh-based traffic splitting and it removes an entire subsystem whose failure modes
+# would be indistinguishable from the ones this project is trying to measure.
+#
+# The Service selector is `app.kubernetes.io/name` only, so it keeps matching both stable
+# and canary pods without edits. The canary pods are distinguished for *analysis* by the
+# rollouts-pod-template-hash label, which podmonitor.yaml preserves.
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: storefront
+  labels:
+    app.kubernetes.io/name: storefront
+    app.kubernetes.io/part-of: k8s-slo-platform
+    app.kubernetes.io/component: api
+spec:
+  # Four, not two. The canary steps are percentages of replica count, and with two
+  # replicas the smallest possible canary is 50% of production traffic - too blunt to
+  # call "catch it before it hurts anyone".
+  replicas: 4
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: storefront
+
+  strategy:
+    canary:
+      # Analysis runs for the whole rollout rather than per step, starting once the
+      # first canary pod is serving. A per-step analysis would restart its measurement
+      # window at each promotion and keep forgetting what it had already seen.
+      analysis:
+        templates:
+          - templateName: storefront-canary
+        startingStep: 1
+        args:
+          - name: service
+            value: storefront
+          - name: namespace
+            value: demo
+          # Resolved by the controller to the canary ReplicaSet's pod-template hash.
+          # This is what scopes the PromQL to canary pods. Without it the query averages
+          # canary and stable together: one broken pod in four at a 50% error rate reads
+          # as 12.5% blended instead of 50%. That still trips the 5% threshold, so this
+          # particular canary would abort anyway - the real exposure is a subtler
+          # regression. Anything under a 20% error rate on the canary dilutes to under
+          # 5% across four pods and gets promoted unnoticed.
+          - name: canary-hash
+            valueFrom:
+              podTemplateHashValue: Latest
+
+      steps:
+        - setWeight: 25
+        # A pause long enough for the analysis to see traffic. At the load generator's
+        # ~8 req/s, one canary pod out of four receives roughly 2 req/s, so a 2-minute
+        # window is ~240 requests - enough for a 5% error-rate threshold to mean
+        # something rather than to trip on a single unlucky request.
+        - pause: { duration: 2m }
+        - setWeight: 50
+        - pause: { duration: 2m }
+        - setWeight: 75
+        - pause: { duration: 1m }
+
+      maxSurge: 1
+      # Full capacity through a rollout. Halving it on every deploy would burn error
+      # budget for a routine event and make the budget useless as a signal about the
+      # service itself.
+      maxUnavailable: 0
+
+      # Roll straight back to stable on a failed analysis instead of parking the
+      # rollout in a degraded state waiting for a human.
+      abortScaleDownDelaySeconds: 30
+
+  progressDeadlineSeconds: 600
+
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: storefront
+        app.kubernetes.io/part-of: k8s-slo-platform
+        app.kubernetes.io/component: api
+    spec:
+      # Spread across nodes so draining one node actually moves traffic. ScheduleAnyway,
+      # not DoNotSchedule: on a 2-worker kind cluster a cordoned node would leave the
+      # evicted pod permanently Pending, turning the drain experiment into a
+      # self-inflicted outage rather than a measurable failover.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: storefront
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: storefront
+          # Overlays set the tag: `local` on kind, the CI-rewritten `sha-<short-sha>` on
+          # EKS. The tag here keeps `kustomize build base` runnable on its own.
+          image: ghcr.io/tani-mani-meow/k8s-slo-platform/storefront:local
+          # kind images arrive via `kind load docker-image`, never a registry, so Always
+          # would fail the pull for an image that is already on the node.
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: storefront-config
+          env:
+            # Pod identity cannot come from a ConfigMap. Resource.create() in
+            # svc_common.tracing merges OTEL_RESOURCE_ATTRIBUTES, so these land on every
+            # span and let a trace in Tempo be traced back to the pod that served it -
+            # the first thing you want when a canary analysis fails.
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: k8s.pod.name=$(POD_NAME),k8s.namespace.name=$(POD_NAMESPACE)
+          # Probe split: readiness is impatient, liveness is not.
+          #
+          # readyz reflects dependency health, so it must react fast - a storefront pod
+          # whose catalog leg is down should leave the Service in seconds.
+          #
+          # healthz only answers "is this process wedged". It gets ~60s of consecutive
+          # failures before a restart because restarting pods during a dependency outage
+          # adds cold starts to an incident and, worse, hides the SLO burn the experiment
+          # exists to measure.
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 3
+            failureThreshold: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 2
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          lifecycle:
+            preStop:
+              exec:
+                # Endpoint removal and container SIGTERM race. Without this pause the
+                # ingress keeps sending to a pod that has already begun shutting down,
+                # and every drain and rollout leaves a scatter of 502s in the SLI that
+                # has nothing to do with the service's own reliability.
+                command: ["/bin/sleep", "5"]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              # No CPU limit, deliberately. CFS throttling surfaces as request latency, so
+              # a latency SLO on a CPU-limited container measures the limit rather than the
+              # service. Memory is limited: there the failure mode is a node-wide OOM, not
+              # a worse percentile.
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            # readOnlyRootFilesystem with nowhere writable is a startup failure waiting
+            # for the first library that calls tempfile. Nothing here writes to disk
+            # today - PYTHONDONTWRITEBYTECODE is set and no handler touches the
+            # filesystem - but the cost of being wrong is a CrashLoopBackOff discovered
+            # during a capture session, and the cost of this is 64Mi of tmpfs.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Mi

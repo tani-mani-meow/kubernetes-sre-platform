@@ -1,0 +1,41 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: storefront
+  labels:
+    app.kubernetes.io/name: storefront
+    app.kubernetes.io/part-of: k8s-slo-platform
+    app.kubernetes.io/component: api
+    # Must equal the Helm release name of kube-prometheus-stack, or that chart must set
+    # `prometheus.prometheusSpec.podMonitorSelectorNilUsesHelmValues: false`. Get this
+    # wrong and nothing errors - the PodMonitor is simply never adopted and every SLO
+    # panel reads `No data`.
+    release: kube-prometheus-stack
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: storefront
+  podMetricsEndpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+      # Under the interval so a slow scrape fails the sample rather than overlapping the
+      # next one.
+      scrapeTimeout: 10s
+  # The load-bearing field. prometheus-operator adds `pod`, `namespace` and `container`
+  # by default but no notion of which revision a pod belongs to. Argo Rollouts' canary
+  # analysis queries `http_requests_total{rollouts_pod_template_hash="<canary hash>"}`,
+  # and without that label copied onto the series the query matches nothing at all.
+  #
+  # The failure is loud rather than silent, which is the good outcome: the
+  # AnalysisTemplate treats no-data as a failure (`isNaN(result[0]) || ...`), so every
+  # canary would abort rather than every canary being promoted. Fail-safe, but it would
+  # make deploys impossible and the cause would not be obvious from the AnalysisRun.
+  #
+  # The dangerous version of this mistake is dropping the label *from the query* rather
+  # than from the series: a query without the hash filter blends canary and stable pods
+  # and quietly reports a diluted error rate.
+  podTargetLabels:
+    - rollouts-pod-template-hash
+    - app.kubernetes.io/name
+    - app.kubernetes.io/component

@@ -1,0 +1,19 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: storefront
+  labels:
+    app.kubernetes.io/name: storefront
+    app.kubernetes.io/part-of: k8s-slo-platform
+    app.kubernetes.io/component: api
+spec:
+  # maxUnavailable rather than minAvailable. At 2 replicas the two are equivalent, but
+  # they diverge in both directions that matter here: minAvailable 1 with 5 replicas would
+  # permit evicting 4 at once, and minAvailable 1 with the CI overlay's single replica
+  # would block `kubectl drain` forever. maxUnavailable 1 always means "one node's worth
+  # of this service at a time", which is exactly what the drain scenario needs to be able
+  # to complete while staying survivable.
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: storefront

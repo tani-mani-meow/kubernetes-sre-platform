@@ -1,0 +1,50 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: demo
+
+resources:
+  - ../../base
+
+images:
+  # Built by `make images` and pushed into the cluster with `kind load docker-image`,
+  # never through a registry. `local` plus the base's IfNotPresent is what makes that work.
+  - name: ghcr.io/tani-mani-meow/k8s-slo-platform/storefront
+    newTag: local
+
+patches:
+  # kind's ingress-nginx is reached through an extraPortMapping on the control-plane node,
+  # so a browser and curl both arrive with `Host: localhost`. Pinning the host rather than
+  # leaving the base's catch-all rule means a request for any other name gets nginx's
+  # default 404 instead of the storefront, which is what a reviewer following the README
+  # should see if they mistype the URL.
+  - target:
+      kind: Ingress
+      name: storefront
+    patch: |
+      - op: add
+        path: /spec/rules/0/host
+        value: localhost
+
+  # kind runs the full observability stack (Prometheus, Loki, Tempo, Grafana, the
+  # collector) plus Argo CD and Chaos Mesh on one laptop. The services get the smaller
+  # share: they are three FastAPI processes serving 8 RPS between them.
+  #
+  # JSON6902, not a strategic merge patch. Rollout is a CRD, so kustomize has no schema
+  # for it and cannot know that `containers` is a list keyed by name - it replaces the
+  # list wholesale instead of merging into it. A strategic merge here silently produced
+  # a container with a name and resources and no image, ports, env or probes. The
+  # sibling Deployment-based services can use strategic merges safely because those are
+  # built-in kinds; this one cannot.
+  - target:
+      kind: Rollout
+      name: storefront
+    patch: |
+      - op: replace
+        path: /spec/template/spec/containers/0/resources
+        value:
+          requests:
+            cpu: 25m
+            memory: 96Mi
+          limits:
+            memory: 192Mi

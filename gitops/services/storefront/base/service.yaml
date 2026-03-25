@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: storefront
+  labels:
+    app.kubernetes.io/name: storefront
+    app.kubernetes.io/part-of: k8s-slo-platform
+    app.kubernetes.io/component: api
+spec:
+  type: ClusterIP
+  # Name only. Adding part-of/component here would freeze them: Service selectors are
+  # mutable but every pod would have to be recreated to follow a change, and the future
+  # Argo Rollout's canary pods must match this selector unchanged.
+  selector:
+    app.kubernetes.io/name: storefront
+  ports:
+    - name: http
+      port: 80
+      # Named, not 8000. The container port is declared once, in the pod template.
+      targetPort: http
+      protocol: TCP

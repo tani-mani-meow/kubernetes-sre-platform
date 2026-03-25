@@ -1,0 +1,41 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: demo
+
+resources:
+  # A Rollout, not a Deployment. storefront is the only service that gets progressive
+  # delivery: it is the one behind the Ingress, so it is the only one where shipping a
+  # bad version is visible to a customer before it is visible on a dashboard.
+  - rollout.yaml
+  - analysistemplate.yaml
+  - service.yaml
+  - ingress.yaml
+  - podmonitor.yaml
+  - pdb.yaml
+
+configMapGenerator:
+  - name: storefront-config
+    literals:
+      # SERVICE_NAME is also baked into the image by app/Dockerfile. It is restated here
+      # because it is the join key for every SLI query, dashboard and Sloth spec
+      # (`service="storefront"`), and a value that important should be visible in the
+      # manifest rather than only in a build arg.
+      - SERVICE_NAME=storefront
+      - LOG_LEVEL=INFO
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector.monitoring:4318
+      - CATALOG_URL=http://catalog
+      - RECS_URL=http://recs
+      # Faults off by default; the chaos harness sets them at runtime via
+      # PUT /internal/faults, and the broken-canary demo sets FAULT_ERROR_RATE here in a
+      # Git commit. FAULT_LATENCY_RATE stays 1.0 to match docs/conventions.md: with
+      # FAULT_LATENCY_MS=0 no latency is injected regardless of the rate, and pinning the
+      # rate to 0 would silently no-op every experiment that sets only the latency.
+      - FAULT_ERROR_RATE=0.0
+      - FAULT_LATENCY_MS=0
+      - FAULT_LATENCY_RATE=1.0
+
+# The name-suffix hash is left on: it is what turns "someone changed FAULT_ERROR_RATE in
+# Git" into a rolling update. Without it Argo would update the ConfigMap and the pods
+# would keep serving the old values until something unrelated restarted them - and the
+# canary demo depends on that commit actually reaching the pods.

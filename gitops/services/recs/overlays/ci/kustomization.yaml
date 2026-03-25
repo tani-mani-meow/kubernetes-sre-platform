@@ -1,0 +1,58 @@
+# Applied by the e2e job with `kubectl apply -k`, no Argo CD.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: demo
+
+resources:
+  - ../../base
+
+images:
+  - name: ghcr.io/tani-mani-meow/k8s-slo-platform/recs
+    newTag: local
+
+replicas:
+  - name: recs
+    count: 1
+
+configMapGenerator:
+  - name: recs-config
+    behavior: merge
+    literals:
+      - OTEL_SDK_DISABLED=true
+      - FAULT_ERROR_RATE=0.0
+      - FAULT_LATENCY_MS=0
+      # The simulated latency stays at its real values. Turning it down would make e2e
+      # green while the fan-out timing it is supposed to exercise never happens - the
+      # storefront degrade-without-recs branch only has meaning against a slow recs.
+
+patches:
+  - target:
+      kind: PodMonitor
+      name: recs
+    patch: |
+      $patch: delete
+      apiVersion: monitoring.coreos.com/v1
+      kind: PodMonitor
+      metadata:
+        name: recs
+
+  - target:
+      kind: Deployment
+      name: recs
+    patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: recs
+      spec:
+        template:
+          spec:
+            containers:
+              - name: recs
+                resources:
+                  requests:
+                    cpu: 25m
+                    memory: 96Mi
+                  limits:
+                    memory: 192Mi

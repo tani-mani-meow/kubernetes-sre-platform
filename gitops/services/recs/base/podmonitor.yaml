@@ -1,0 +1,26 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: recs
+  labels:
+    app.kubernetes.io/name: recs
+    app.kubernetes.io/part-of: k8s-slo-platform
+    app.kubernetes.io/component: api
+    # Must equal the kube-prometheus-stack Helm release name, or that chart must set
+    # `podMonitorSelectorNilUsesHelmValues: false`. A mismatch fails silently.
+    release: kube-prometheus-stack
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: recs
+  podMetricsEndpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+      scrapeTimeout: 10s
+  # Identical label set across all three services - see the storefront PodMonitor for why
+  # rollouts-pod-template-hash has to be here even on services that are not canaried.
+  podTargetLabels:
+    - rollouts-pod-template-hash
+    - app.kubernetes.io/name
+    - app.kubernetes.io/component

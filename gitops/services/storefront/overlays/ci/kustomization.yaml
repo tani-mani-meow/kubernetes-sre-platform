@@ -1,0 +1,75 @@
+# Applied by the e2e job with `kubectl apply -k`. No Argo CD, no observability stack, no
+# chaos - the question this overlay answers is only "do the three services and the
+# database actually work together against a real Postgres".
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: demo
+
+resources:
+  - ../../base
+
+images:
+  - name: ghcr.io/tani-mani-meow/k8s-slo-platform/storefront
+    newTag: local
+
+# Replica count is set by a patch below rather than the `replicas:` transformer: that
+# transformer only recognises the built-in workload kinds and errors out on a Rollout.
+
+configMapGenerator:
+  - name: storefront-config
+    behavior: merge
+    literals:
+      # There is no collector in the e2e cluster. Without this the OTLP exporter retries
+      # against a name that does not resolve, and the retry backoff shows up as latency in
+      # the very requests the test is asserting on.
+      - OTEL_SDK_DISABLED=true
+      # Restated rather than inherited. The canary demo works by committing a non-zero
+      # FAULT_ERROR_RATE into the base, and on the day someone does that, e2e must not
+      # start failing for reasons that have nothing to do with the commit under test.
+      - FAULT_ERROR_RATE=0.0
+      - FAULT_LATENCY_MS=0
+
+patches:
+  # prometheus-operator's CRDs are not installed in the e2e cluster, and `kubectl apply`
+  # rejects an unknown kind outright - it would fail the whole overlay, not just this one
+  # object. Metrics correctness is covered by the unit tests and by the kind environment.
+  - target:
+      kind: PodMonitor
+      name: storefront
+    patch: |
+      $patch: delete
+      apiVersion: monitoring.coreos.com/v1
+      kind: PodMonitor
+      metadata:
+        name: storefront
+
+  # Two replicas, and no canary analysis. The e2e job asks "do the services work together
+  # against a real Postgres", and a first deploy of a Rollout scales up normally anyway -
+  # there is no stable version to canary against. Leaving the analysis in would just make
+  # the job wait out pause steps for nothing.
+  #
+  # JSON6902, not a strategic merge patch: Rollout is a CRD, so kustomize has no merge key
+  # for `containers` and would replace the list rather than merge into it, leaving a
+  # container with no image. See the same note in the kind overlay.
+  - target:
+      kind: Rollout
+      name: storefront
+    patch: |
+      - op: replace
+        path: /spec/replicas
+        value: 2
+      - op: remove
+        path: /spec/strategy/canary/analysis
+      - op: replace
+        path: /spec/strategy/canary/steps
+        value:
+          - setWeight: 100
+      - op: replace
+        path: /spec/template/spec/containers/0/resources
+        value:
+          requests:
+            cpu: 25m
+            memory: 96Mi
+          limits:
+            memory: 192Mi

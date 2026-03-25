@@ -1,0 +1,130 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: recs
+  labels:
+    app.kubernetes.io/name: recs
+    app.kubernetes.io/part-of: k8s-slo-platform
+    app.kubernetes.io/component: api
+spec:
+  # Two replicas, same as the others. recs is the dependency storefront degrades around,
+  # so the interesting scenario is "recs slow", not "recs gone" - but a single replica
+  # would make every pod kill an outage and there would be nothing to degrade *from*.
+  replicas: 2
+  revisionHistoryLimit: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  progressDeadlineSeconds: 300
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: recs
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: recs
+        app.kubernetes.io/part-of: k8s-slo-platform
+        app.kubernetes.io/component: api
+    spec:
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: recs
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: recs
+          image: ghcr.io/tani-mani-meow/k8s-slo-platform/recs:local
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: recs-config
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: k8s.pod.name=$(POD_NAME),k8s.namespace.name=$(POD_NAMESPACE)
+          # recs has no external dependency, so /readyz answers immediately and is not
+          # affected by the simulated latency (the fault and slow-path code exempt
+          # /healthz, /readyz and /metrics). Probe timings therefore do not need padding
+          # for the 250ms baseline - if they did, a slower RECS_BASE_LATENCY_MS in a
+          # future experiment would start failing probes and restarting healthy pods.
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 3
+            failureThreshold: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 2
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          lifecycle:
+            preStop:
+              exec:
+                # Longer-lived requests than the other two services: a tail request is
+                # still sleeping 650ms when SIGTERM arrives. Five seconds covers endpoint
+                # propagation and the in-flight tail.
+                command: ["/bin/sleep", "5"]
+          resources:
+            requests:
+              # Half of storefront/catalog: recs spends its wall-clock time in
+              # asyncio.sleep, not on CPU, so a request-based scheduler reservation sized
+              # from its latency would strand capacity on a kind node.
+              cpu: 25m
+              memory: 128Mi
+            limits:
+              # No CPU limit. recs exists to produce a specific latency distribution
+              # (250ms baseline, 5% tail at +400ms); throttling would add a second,
+              # unintended source of latency and the p95 would stop meaning what the
+              # scenario says it means.
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            # readOnlyRootFilesystem with nowhere writable is a startup failure waiting
+            # for the first library that calls tempfile. Nothing here writes to disk
+            # today - PYTHONDONTWRITEBYTECODE is set and no handler touches the
+            # filesystem - but the cost of being wrong is a CrashLoopBackOff discovered
+            # during a capture session, and the cost of this is 64Mi of tmpfs.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Mi

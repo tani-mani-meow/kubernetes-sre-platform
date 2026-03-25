@@ -1,0 +1,84 @@
+# The gate a canary has to pass.
+#
+# Two measurements, both scoped to the canary pods only via rollouts-pod-template-hash.
+# That scoping is the load-bearing detail of the whole progressive-delivery story. A
+# query that averaged canary and stable together would divide the canary's error rate by
+# the replica count: at 25% weight, anything below a 20% error rate on the canary dilutes
+# to under the 5% threshold and gets promoted unnoticed. podmonitor.yaml carries
+# `podTargetLabels: [rollouts-pod-template-hash]` so the label survives onto the series.
+#
+# Thresholds are deliberately tighter than the SLO. The SLO is a monthly budget; this is
+# a pre-flight check on a version that has been live for two minutes. Waiting for a
+# 14.4x burn rate to page would mean the bad version was already in production.
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: storefront-canary
+  labels:
+    app.kubernetes.io/name: storefront
+    app.kubernetes.io/part-of: k8s-slo-platform
+spec:
+  args:
+    - name: service
+    - name: namespace
+    - name: canary-hash
+
+  metrics:
+    - name: canary-error-rate
+      # Start measuring only after a window of traffic exists. Querying immediately
+      # returns no data on a pod that has served nothing yet.
+      initialDelay: 60s
+      interval: 30s
+      # Three consecutive failures aborts. One is too twitchy for a 30s window at ~2
+      # req/s: a single 500 in a 60-request window is a 1.7% error rate, and normal
+      # variance should not roll back a good deploy.
+      failureLimit: 2
+      # No data is not success. A canary that is not serving at all - crash-looping, or
+      # never became Ready - would otherwise pass by returning nothing.
+      failureCondition: "isNaN(result[0]) || result[0] > 0.05"
+      successCondition: "!isNaN(result[0]) && result[0] <= 0.05"
+      count: 8
+      provider:
+        prometheus:
+          address: http://kube-prometheus-stack-prometheus.monitoring:9090
+          query: |
+            sum(rate(http_requests_total{
+              service="{{args.service}}",
+              rollouts_pod_template_hash="{{args.canary-hash}}",
+              status_code=~"5.."
+            }[2m]))
+            /
+            sum(rate(http_requests_total{
+              service="{{args.service}}",
+              rollouts_pod_template_hash="{{args.canary-hash}}"
+            }[2m]))
+
+    - name: canary-latency-p95-breach
+      # Fraction of canary requests slower than storefront's 400ms SLO threshold.
+      # Allowed up to 10%: looser than the 1% latency budget, because a freshly started
+      # pod pays cold-start costs (connection pools, first-request imports) that are not
+      # a defect, and tighter than the 14.4% the fast-burn page fires at - which is the
+      # comparison that matters. The gate catches in two minutes what the SLO alert
+      # would take an hour to notice.
+      initialDelay: 60s
+      interval: 30s
+      failureLimit: 2
+      failureCondition: "isNaN(result[0]) || result[0] > 0.10"
+      successCondition: "!isNaN(result[0]) && result[0] <= 0.10"
+      count: 8
+      provider:
+        prometheus:
+          address: http://kube-prometheus-stack-prometheus.monitoring:9090
+          query: |
+            1 - (
+              sum(rate(http_request_duration_seconds_bucket{
+                service="{{args.service}}",
+                rollouts_pod_template_hash="{{args.canary-hash}}",
+                le="0.4"
+              }[2m]))
+              /
+              sum(rate(http_request_duration_seconds_count{
+                service="{{args.service}}",
+                rollouts_pod_template_hash="{{args.canary-hash}}"
+              }[2m]))
+            )

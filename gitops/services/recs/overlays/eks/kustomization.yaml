@@ -1,0 +1,35 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: demo
+
+resources:
+  - ../../base
+
+images:
+  - name: ghcr.io/tani-mani-meow/k8s-slo-platform/recs
+    newTag: sha-placeholder
+
+patches:
+  # The latency knobs are NOT raised here. recs' whole purpose is a known, fixed latency
+  # distribution, and an environment that changed it would make the kind and EKS evidence
+  # incomparable - which is the one thing the two capture runs exist to allow.
+  - target:
+      kind: Deployment
+      name: recs
+    patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: recs
+      spec:
+        template:
+          spec:
+            containers:
+              - name: recs
+                resources:
+                  requests:
+                    cpu: 50m
+                    memory: 256Mi
+                  limits:
+                    memory: 512Mi

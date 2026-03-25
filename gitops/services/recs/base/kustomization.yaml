@@ -1,0 +1,29 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: demo
+
+resources:
+  - deployment.yaml
+  - service.yaml
+  - podmonitor.yaml
+  - pdb.yaml
+
+configMapGenerator:
+  - name: recs-config
+    literals:
+      - SERVICE_NAME=recs
+      - LOG_LEVEL=INFO
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector.monitoring:4318
+      # The latency profile is configuration, not code: 250ms baseline with a 2% tail at
+      # +400ms puts p50 near 250ms and p99 near 650ms, which straddles recs' 800ms SLO
+      # threshold closely enough that a modest regression is visible in the SLI instead of
+      # being swallowed by headroom. These are also the defaults in app/services/recs, so
+      # a mismatch here would be a silent change of experiment conditions.
+      - RECS_BASE_LATENCY_MS=250
+      - RECS_TAIL_LATENCY_MS=400
+      - RECS_TAIL_RATE=0.02
+      # See storefront: rate stays 1.0 per docs/conventions.md and is inert at 0ms.
+      - FAULT_ERROR_RATE=0.0
+      - FAULT_LATENCY_MS=0
+      - FAULT_LATENCY_RATE=1.0

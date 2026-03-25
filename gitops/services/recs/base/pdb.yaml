@@ -1,0 +1,15 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: recs
+  labels:
+    app.kubernetes.io/name: recs
+    app.kubernetes.io/part-of: k8s-slo-platform
+    app.kubernetes.io/component: api
+spec:
+  # maxUnavailable, not minAvailable: correct as replicas grow, and it does not deadlock
+  # a drain in the single-replica CI overlay.
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: recs

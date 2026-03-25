@@ -1,0 +1,32 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: demo
+
+resources:
+  - ../../base
+
+images:
+  - name: ghcr.io/tani-mani-meow/k8s-slo-platform/recs
+    newTag: local
+
+patches:
+  - target:
+      kind: Deployment
+      name: recs
+    patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: recs
+      spec:
+        template:
+          spec:
+            containers:
+              - name: recs
+                resources:
+                  requests:
+                    cpu: 25m
+                    memory: 96Mi
+                  limits:
+                    memory: 192Mi
