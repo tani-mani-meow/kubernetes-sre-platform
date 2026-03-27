@@ -1,0 +1,80 @@
+# Loki chart 7.3.0 (Loki 3.6.x) — EKS.
+#
+# Identical topology to kind. S3 would be the production answer here, but these
+# clusters live for a few hours and an S3 bucket plus an IRSA role is
+# infrastructure that infra/ would have to create and destroy for no additional
+# evidence. Filesystem on an EBS volume is the same code path Loki runs in
+# single-binary mode either way.
+#
+# See values-kind.yaml for why each of these settings is here; only the sizes
+# differ.
+
+deploymentMode: SingleBinary
+
+loki:
+  auth_enabled: false
+
+  commonConfig:
+    replication_factor: 1
+
+  storage:
+    type: filesystem
+
+  # v13 + tsdb — required for the structured metadata that carries trace_id
+  # through OTLP ingestion.
+  schemaConfig:
+    configs:
+      - from: "2024-04-01"
+        store: tsdb
+        object_store: filesystem
+        schema: v13
+        index:
+          prefix: index_
+          period: 24h
+
+  limits_config:
+    allow_structured_metadata: true
+    retention_period: 24h
+    volume_enabled: true
+
+  compactor:
+    retention_enabled: true
+    delete_request_store: filesystem
+
+  analytics:
+    reporting_enabled: false
+
+singleBinary:
+  replicas: 1
+  persistence:
+    enabled: true
+    # Default StorageClass (gp2 via the EBS CSI addon). Unlike kind's local-path
+    # this is a real provisioned volume, so the number is a real cost.
+    size: 20Gi
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      memory: 1536Mi
+
+read:
+  replicas: 0
+write:
+  replicas: 0
+backend:
+  replicas: 0
+
+chunksCache:
+  enabled: false
+resultsCache:
+  enabled: false
+
+gateway:
+  enabled: false
+
+lokiCanary:
+  enabled: false
+
+test:
+  enabled: false

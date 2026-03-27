@@ -1,0 +1,220 @@
+# kube-prometheus-stack 88.6.2 — EKS.
+#
+# Same release name and therefore the same service DNS as values-kind.yaml; see
+# that file for the endpoint list. Differences from kind, and only these:
+#   - Prometheus keeps a PVC and 24h of data, because an evidence-capture
+#     session is worth being able to re-query after the fact.
+#   - The control-plane scrape targets are disabled for a different reason (AWS
+#     manages them and does not expose them) rather than the same one.
+#   - Slightly larger resource requests; EKS nodes are not a laptop.
+
+crds:
+  enabled: true
+
+prometheus:
+  prometheusSpec:
+    # See values-kind.yaml — our PodMonitors and PrometheusRules carry no
+    # `release` label and are invisible to Prometheus without these four.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    probeSelectorNilUsesHelmValues: false
+    scrapeConfigSelectorNilUsesHelmValues: false
+
+    scrapeInterval: 30s
+    evaluationInterval: 30s
+
+    # 24h. Long enough to re-run a query the morning after a capture session and
+    # still short enough that the PVC below stays small. Note the 72h ticket
+    # burn-rate window from docs/conventions.md still has no data behind it —
+    # deliberate: these clusters are destroyed the same day.
+    retention: 24h
+    retentionSize: 8GB
+    replicas: 1
+
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          accessModes: ["ReadWriteOnce"]
+          # No storageClassName: use whatever the cluster's default class is
+          # (gp2 via the EBS CSI addon on a stock EKS cluster). Naming gp3 here
+          # would require a StorageClass that infra/ does not create.
+          resources:
+            requests:
+              storage: 10Gi
+
+    walCompression: true
+
+    enableFeatures:
+      - exemplar-storage
+
+    resources:
+      requests:
+        cpu: 300m
+        memory: 1Gi
+      limits:
+        memory: 3Gi
+
+# --- Control-plane scrape targets ------------------------------------------
+# On EKS the control plane is AWS's. etcd, the scheduler and the
+# controller-manager have no reachable metrics endpoint at all, so these are off
+# for a harder reason than on kind — there is nothing to point at.
+kubeEtcd:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeControllerManager:
+  enabled: false
+kubeProxy:
+  # kube-proxy does run on the data-plane nodes here, so this one is arguably
+  # scrapeable. Left off because its metricsBindAddress depends on the EKS
+  # add-on version, and a target that turns out to be bound to 127.0.0.1 shows
+  # up red for the whole of a timed capture session with no time to fix it.
+  enabled: false
+
+kubelet:
+  enabled: true
+kubeApiServer:
+  enabled: true
+coreDns:
+  enabled: true
+kubeStateMetrics:
+  enabled: true
+nodeExporter:
+  enabled: true
+
+defaultRules:
+  create: true
+  rules:
+    etcd: false
+    kubeControllerManager: false
+    kubeProxy: false
+    kubeSchedulerAlerting: false
+    kubeSchedulerRecording: false
+    windows: false
+
+alertmanager:
+  enabled: true
+  config:
+    global:
+      resolve_timeout: 2m
+    route:
+      group_by: ["alertname", "service", "severity"]
+      group_wait: 10s
+      group_interval: 1m
+      repeat_interval: 1h
+      receiver: "null"
+      routes:
+        - receiver: "null"
+          matchers:
+            - alertname = "Watchdog"
+    receivers:
+      - name: "null"
+    # Inherited inhibit_rules suppress the ticket alert while the page alert for
+    # the same SLO is firing; the harness reads status.state. See values-kind.yaml.
+  alertmanagerSpec:
+    replicas: 1
+    storage: {}
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      limits:
+        memory: 256Mi
+
+grafana:
+  enabled: true
+  adminUser: admin
+  # Same demo credential as kind. Grafana is ClusterIP here too — the EKS
+  # clusters are reached by port-forward, never by an ingress, so no public
+  # login page exists to protect.
+  adminPassword: demo-not-a-secret
+
+  defaultDashboardsEnabled: true
+  defaultDashboardsTimezone: utc
+
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      labelValue: "1"
+      searchNamespace: ALL
+      provider:
+        allowUiUpdates: false
+    datasources:
+      enabled: true
+      defaultDatasourceEnabled: true
+      isDefaultDatasource: true
+      uid: prometheus
+      exemplarTraceIdDestinations:
+        datasourceUid: tempo
+        traceIdLabelName: trace_id
+        urlDisplayLabel: View trace
+
+  additionalDataSources:
+    - name: Loki
+      type: loki
+      uid: loki
+      access: proxy
+      url: http://loki.monitoring.svc.cluster.local:3100
+      jsonData:
+        derivedFields:
+          - name: TraceID
+            matcherType: label
+            matcherRegex: trace_id
+            url: "${__value.raw}"
+            datasourceUid: tempo
+            urlDisplayLabel: View trace
+          - name: TraceIDFromBody
+            matcherRegex: '"trace_id"\s*:\s*"([a-f0-9]{32})"'
+            url: "${__value.raw}"
+            datasourceUid: tempo
+            urlDisplayLabel: View trace
+
+    - name: Tempo
+      type: tempo
+      uid: tempo
+      access: proxy
+      url: http://tempo.monitoring.svc.cluster.local:3200
+      jsonData:
+        tracesToLogsV2:
+          datasourceUid: loki
+          spanStartTimeShift: -5m
+          spanEndTimeShift: 5m
+          filterByTraceID: true
+          filterBySpanID: false
+          tags:
+            - key: service.name
+              value: service_name
+        nodeGraph:
+          enabled: true
+
+  grafana.ini:
+    analytics:
+      check_for_updates: false
+      reporting_enabled: false
+    news:
+      news_feed_enabled: false
+
+  service:
+    type: ClusterIP
+
+  persistence:
+    # Still off: everything Grafana knows comes from provisioning, and a PVC
+    # would only slow down cluster teardown.
+    enabled: false
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 512Mi
+
+prometheusOperator:
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 512Mi

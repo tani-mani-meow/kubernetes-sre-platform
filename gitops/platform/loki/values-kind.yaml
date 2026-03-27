@@ -1,0 +1,108 @@
+# Loki chart 7.3.0 (Loki 3.6.x) — kind.
+#
+# Service DNS: loki.monitoring.svc.cluster.local:3100
+# Written to by the OTel Collector at POST /otlp/v1/logs, read by the Grafana
+# Loki datasource provisioned in the kube-prometheus-stack values.
+
+# One process holding distributor, ingester, querier and compactor. The
+# SimpleScalable default would give three Deployments plus a memberlist ring to
+# store a few hundred MB of demo logs.
+deploymentMode: SingleBinary
+
+loki:
+  # Single tenant. With auth off Loki uses the tenant id "fake" internally and
+  # neither the collector nor Grafana has to send X-Scope-OrgID.
+  auth_enabled: false
+
+  commonConfig:
+    # Chart default is 3. A single ingester cannot satisfy a replication factor
+    # of 3, so every write is rejected and Loki looks up-but-broken.
+    replication_factor: 1
+
+  storage:
+    type: filesystem
+
+  # Not optional, and not defaulted by the chart — it fails template rendering
+  # if schemaConfig is empty and useTestSchema is false.
+  #
+  # v13 + tsdb specifically: structured metadata is what native OTLP ingestion
+  # writes trace_id and span_id into, and structured metadata requires both.
+  # Anything older silently downgrades the log-to-trace link that the whole
+  # correlation demo rests on.
+  schemaConfig:
+    configs:
+      - from: "2024-04-01"
+        store: tsdb
+        object_store: filesystem
+        schema: v13
+        index:
+          prefix: index_
+          period: 24h
+
+  limits_config:
+    # Default is already true in Loki 3.x; stated explicitly because turning it
+    # off is the one setting that breaks OTLP ingestion outright.
+    allow_structured_metadata: true
+    retention_period: 24h
+    # Powers the log-volume histogram above Grafana's Explore results.
+    volume_enabled: true
+
+  compactor:
+    # retention_period above is only advisory until the compactor is allowed to
+    # act on it; without this Loki keeps every chunk forever.
+    retention_enabled: true
+    # Loki 3.x refuses to start with retention enabled and no delete store.
+    delete_request_store: filesystem
+
+  analytics:
+    # A kind cluster has no business phoning home to Grafana Labs, and the
+    # failed request shows up in the logs every few minutes when it cannot.
+    reporting_enabled: false
+
+singleBinary:
+  replicas: 1
+  persistence:
+    enabled: true
+    # kind's default StorageClass is rancher local-path: a directory on the
+    # node, allocated lazily. This number is a cap, not a reservation.
+    size: 5Gi
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 768Mi
+
+# --- Components the SingleBinary mode replaces ------------------------------
+# The chart still renders read/write/backend unless their replica counts are
+# zeroed, and would leave three empty Deployments behind.
+read:
+  replicas: 0
+write:
+  replicas: 0
+backend:
+  replicas: 0
+
+chunksCache:
+  # The single most expensive default in this chart: the chunks memcached asks
+  # for 8Gi of memory, which on a kind node means the pod never schedules and
+  # Loki sits Pending behind it. A demo-sized index does not need a cache.
+  enabled: false
+resultsCache:
+  enabled: false
+
+gateway:
+  # An nginx in front of the single binary, only useful for splitting read and
+  # write paths across the scalable components. Disabling it is what makes the
+  # Service name plainly `loki`.
+  enabled: false
+
+lokiCanary:
+  # A DaemonSet that writes synthetic log lines and alerts on their absence.
+  # Real value in production, pure noise in a demo where the interesting logs
+  # are the application's.
+  enabled: false
+
+test:
+  # Helm test pods; nothing runs `helm test` here, Argo CD does the syncing.
+  enabled: false

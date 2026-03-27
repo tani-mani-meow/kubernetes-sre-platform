@@ -1,0 +1,59 @@
+# ingress-nginx 4.15.1 — EKS.
+#
+# Real cloud load balancer here, so none of the kind hostPort machinery applies:
+# ordinary Deployment, ordinary Service of type LoadBalancer, scheduled wherever
+# there is room.
+
+controller:
+  # Two replicas across nodes. Not for capacity — the load generator does not
+  # need it — but so a node-drain chaos experiment has something to demonstrate
+  # at the ingress layer instead of taking the whole edge down.
+  replicaCount: 2
+
+  service:
+    type: LoadBalancer
+    annotations:
+      # The legacy in-tree annotation, handled by the AWS cloud controller
+      # manager that EKS already runs. Deliberately NOT the
+      # service.beta.kubernetes.io/aws-load-balancer-type: external form, which
+      # requires the AWS Load Balancer Controller — an add-on planning.md
+      # explicitly rejected, and one more thing to install before an
+      # evidence-capture session can start.
+      service.beta.kubernetes.io/aws-load-balancer-type: nlb
+      service.beta.kubernetes.io/aws-load-balancer-cross-zone-load-balancing-enabled: "true"
+      # TCP all the way through. TLS termination happens nowhere in this project;
+      # there is no certificate and no domain.
+      service.beta.kubernetes.io/aws-load-balancer-backend-protocol: tcp
+
+    # Cluster, not Local. Local would preserve the client source IP, which
+    # nothing here looks at, and would black-hole traffic on any node that
+    # happens not to be running one of the two replicas.
+    externalTrafficPolicy: Cluster
+
+  publishService:
+    # There is a LoadBalancer now, so let the controller write its hostname into
+    # each Ingress's status.
+    enabled: true
+
+  ingressClassResource:
+    name: nginx
+    enabled: true
+    default: true
+
+  watchIngressWithoutClass: true
+
+  metrics:
+    enabled: true
+    serviceMonitor:
+      enabled: true
+
+  # Still not 300s. Cluster teardown is on the critical path of every capture
+  # session, and there is no production traffic to drain.
+  terminationGracePeriodSeconds: 60
+
+  resources:
+    requests:
+      cpu: 200m
+      memory: 256Mi
+    limits:
+      memory: 512Mi

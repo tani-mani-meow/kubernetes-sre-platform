@@ -1,0 +1,146 @@
+# opentelemetry-collector chart 0.172.0 — kind. Gateway deployment.
+#
+# fullnameOverride is load-bearing, not cosmetic. docs/conventions.md fixes
+# OTEL_EXPORTER_OTLP_ENDPOINT at http://otel-collector.monitoring:4318 and the
+# three services already have it baked in. Without the override the chart names
+# the Service <release>-opentelemetry-collector and every span is dropped at the
+# SDK with a DNS error nobody looks at.
+fullnameOverride: otel-collector
+
+# Gateway, not agent: one process for the whole cluster, so the k8sattributes
+# cache and the batcher are shared and the services talk to a stable DNS name
+# rather than to whatever node they happen to be on.
+mode: deployment
+replicaCount: 1
+
+image:
+  # The chart ships no default repository and will not render without one.
+  # contrib, not core: the k8sattributes processor is not in the core distro.
+  repository: otel/opentelemetry-collector-contrib
+  # tag omitted — defaults to the chart appVersion, which is the version the
+  # chart's config schema was written against.
+
+# command.name is deliberately left unset. The chart derives otelcol-contrib
+# from the chart name; it only needs overriding for the core image.
+
+presets:
+  kubernetesAttributes:
+    # Creates the ClusterRole (pods, namespaces, replicasets: get/list/watch)
+    # and the k8sattributes processor config. Without it the processor exists in
+    # the binary but has no RBAC and silently enriches nothing.
+    enabled: true
+
+ports:
+  # No jaeger or zipkin receiver below, so these Service ports would resolve to
+  # a closed container port.
+  jaeger-compact:
+    enabled: false
+  jaeger-thrift:
+    enabled: false
+  jaeger-grpc:
+    enabled: false
+  zipkin:
+    enabled: false
+  metrics:
+    # The collector's own telemetry on 8888 — otelcol_receiver_accepted_spans,
+    # otelcol_exporter_send_failed_log_records and friends. This is how you tell
+    # "the app is not emitting" from "the collector cannot reach Tempo", which
+    # is the first question when a trace does not appear.
+    enabled: true
+
+serviceMonitor:
+  # Scraped because the Prometheus in this stack has a nil ServiceMonitor
+  # selector (see the kube-prometheus-stack values).
+  enabled: true
+
+config:
+  receivers:
+    # The chart's default otlp receiver already binds ${env:MY_POD_IP} on 4317
+    # and 4318, which is what conventions.md expects; nothing to restate.
+    #
+    # These three are chart defaults being removed. Helm merges maps, so a
+    # component only disappears if it is explicitly nulled — leaving them would
+    # keep three listeners open for protocols nothing in this project speaks.
+    jaeger: null
+    zipkin: null
+    # The default prometheus receiver scrapes the collector's own 8888 endpoint
+    # and feeds it into a metrics pipeline. Removed with that pipeline below;
+    # the ServiceMonitor above collects the same numbers without a round trip
+    # through the collector.
+    prometheus: null
+
+  processors:
+    memory_limiter:
+      # limit_percentage is read against the container's cgroup limit, so this
+      # is only meaningful because resources.limits.memory is set below. Without
+      # a limit the percentages resolve against the node's total memory and the
+      # limiter never engages.
+      check_interval: 5s
+      limit_percentage: 80
+      spike_limit_percentage: 25
+    batch:
+      # Small batches, flushed often. A demo watches a trace appear in Grafana
+      # seconds after clicking; the default timeout makes that feel broken.
+      timeout: 5s
+      send_batch_size: 512
+      send_batch_max_size: 1024
+
+  exporters:
+    # Traces to Tempo over OTLP/gRPC. Plaintext: same cluster, no mesh, and TLS
+    # between two pods in monitoring would be ceremony with no threat model
+    # behind it.
+    otlp:
+      endpoint: tempo.monitoring.svc.cluster.local:4317
+      tls:
+        insecure: true
+
+    # Logs to Loki over OTLP/HTTP. Loki 3.x ingests OTLP natively at
+    # /otlp/v1/logs, and the otlphttp exporter appends /v1/logs to this endpoint.
+    #
+    # Not the `loki` exporter: it was deprecated and removed from contrib. It
+    # also required hand-mapping attributes to Loki labels, which is exactly the
+    # step that produced high-cardinality label sets by accident.
+    otlphttp/loki:
+      endpoint: http://loki.monitoring.svc.cluster.local:3100/otlp
+
+    # Chart default, removed. Nothing in this pipeline should be writing spans
+    # to stdout; re-adding it is one line when debugging.
+    debug: null
+
+  service:
+    pipelines:
+      traces:
+        receivers: [otlp]
+        # memory_limiter first — it can only shed load if it sees data before
+        # anything has buffered it. k8sattributes before batch so the batcher
+        # groups already-enriched records.
+        #
+        # k8sattributes is listed explicitly even though the preset injects it:
+        # Helm replaces lists rather than merging them, so declaring this
+        # pipeline at all discards whatever the preset appended.
+        processors: [memory_limiter, k8sattributes, batch]
+        exporters: [otlp]
+
+      logs:
+        receivers: [otlp]
+        processors: [memory_limiter, k8sattributes, batch]
+        exporters: [otlphttp/loki]
+
+      # No metrics pipeline, on purpose.
+      #
+      # Application metrics are scraped per pod by Prometheus (planning.md, and
+      # the PodMonitors in gitops/services/*/base). Routing them through a
+      # gateway collector would rewrite every series' identity to the
+      # collector's pod, erasing the rollouts-pod-template-hash label — and that
+      # label is the only thing that lets an Argo Rollouts AnalysisRun compare
+      # canary pods against stable ones. The canary demo would silently measure
+      # the wrong population and never abort.
+      metrics: null
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    # Required for memory_limiter's percentage thresholds to mean anything.
+    memory: 512Mi

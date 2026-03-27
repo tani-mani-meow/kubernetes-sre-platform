@@ -1,0 +1,81 @@
+# opentelemetry-collector chart 0.172.0 — EKS. Gateway deployment.
+#
+# Identical pipeline to kind; only the resource envelope changes. Still one
+# replica: the trace and log volume from three demo services under a synthetic
+# load generator does not need two, and a second replica would split the
+# k8sattributes cache for no benefit.
+#
+# See values-kind.yaml for the reasoning behind every key here, in particular
+# why there is no metrics pipeline.
+fullnameOverride: otel-collector
+
+mode: deployment
+replicaCount: 1
+
+image:
+  repository: otel/opentelemetry-collector-contrib
+
+presets:
+  kubernetesAttributes:
+    enabled: true
+
+ports:
+  jaeger-compact:
+    enabled: false
+  jaeger-thrift:
+    enabled: false
+  jaeger-grpc:
+    enabled: false
+  zipkin:
+    enabled: false
+  metrics:
+    enabled: true
+
+serviceMonitor:
+  enabled: true
+
+config:
+  receivers:
+    jaeger: null
+    zipkin: null
+    prometheus: null
+
+  processors:
+    memory_limiter:
+      check_interval: 5s
+      limit_percentage: 80
+      spike_limit_percentage: 25
+    batch:
+      timeout: 5s
+      send_batch_size: 512
+      send_batch_max_size: 1024
+
+  exporters:
+    otlp:
+      endpoint: tempo.monitoring.svc.cluster.local:4317
+      tls:
+        insecure: true
+    otlphttp/loki:
+      endpoint: http://loki.monitoring.svc.cluster.local:3100/otlp
+    debug: null
+
+  service:
+    pipelines:
+      traces:
+        receivers: [otlp]
+        processors: [memory_limiter, k8sattributes, batch]
+        exporters: [otlp]
+      logs:
+        receivers: [otlp]
+        processors: [memory_limiter, k8sattributes, batch]
+        exporters: [otlphttp/loki]
+      # Metrics are scraped per pod so Rollouts can see
+      # rollouts-pod-template-hash. See values-kind.yaml.
+      metrics: null
+
+resources:
+  requests:
+    cpu: 200m
+    memory: 256Mi
+  limits:
+    memory: 1Gi

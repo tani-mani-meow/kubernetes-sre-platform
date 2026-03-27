@@ -1,0 +1,53 @@
+# Tempo chart 1.24.4 (single binary) — EKS.
+#
+# Same shape as kind. Local storage rather than S3 for the same reason Loki uses
+# it here: an S3 bucket plus IRSA is infrastructure with a lifecycle to manage,
+# and these clusters are destroyed the day they are created.
+#
+# See values-kind.yaml for the reasoning behind each key.
+
+tempo:
+  retention: 24h
+
+  # Still well below the chart's 1024 default. Nothing about a demo trace volume
+  # justifies a gigabyte of ballast, EKS node or not.
+  memBallastSizeMbs: 256
+
+  storage:
+    trace:
+      backend: local
+      local:
+        path: /var/tempo/traces
+      wal:
+        path: /var/tempo/wal
+
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
+    # jaeger/opencensus left at defaults — _ports.tpl cannot survive them being
+    # nulled.
+
+  metricsGenerator:
+    # Off here too. The SLIs come from in-process Prometheus metrics; a second,
+    # span-derived set of latency numbers would contradict them.
+    enabled: false
+
+  reportingEnabled: false
+
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      memory: 1536Mi
+
+persistence:
+  enabled: true
+  size: 20Gi
+
+serviceMonitor:
+  enabled: true

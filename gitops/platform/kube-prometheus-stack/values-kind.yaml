@@ -1,0 +1,301 @@
+# kube-prometheus-stack 88.6.2 — kind.
+#
+# Endpoints other components hard-code against this release name:
+#   Prometheus    http://kube-prometheus-stack-prometheus.monitoring:9090
+#   Alertmanager  http://kube-prometheus-stack-alertmanager.monitoring:9093
+#   Grafana       http://kube-prometheus-stack-grafana.monitoring:80
+# Renaming the Argo CD Application will not move them — helm.releaseName is
+# pinned in gitops/clusters/*/apps/kube-prometheus-stack.yaml for that reason.
+
+crds:
+  enabled: true
+
+# --- Selector discovery -----------------------------------------------------
+# The single most important block in this file.
+#
+# By default the chart sets serviceMonitorSelector (and the other three) to
+# `matchLabels: {release: <release>}`. Our PodMonitors come from
+# gitops/services/*/base and our PrometheusRules from gitops/slo/generated —
+# neither carries a `release` label, so with the defaults Prometheus would come
+# up healthy, scrape nothing of ours, evaluate no SLO rules, and every dashboard
+# panel would read "No data" with nothing in any log to explain it.
+#
+# Setting these to false makes the operator emit a nil selector, which means
+# "select everything in the watched namespaces".
+prometheus:
+  prometheusSpec:
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    probeSelectorNilUsesHelmValues: false
+    scrapeConfigSelectorNilUsesHelmValues: false
+
+    # 30s matches docs/conventions.md. The latency SLIs are bucket ratios rather
+    # than histogram_quantile estimates, so a coarser interval costs resolution
+    # on the dashboards but does not bias the SLI.
+    scrapeInterval: 30s
+    evaluationInterval: 30s
+
+    # 24h, not 6h, because of how rate() degrades rather than fails. A
+    # rate(x[24h]) against 6h of retained data does not return "no data" - it
+    # quietly computes over the 6h that exist, so the 2h/24h ticket burn-rate rule
+    # would evaluate, publish a number, and be measuring a window four times
+    # shorter than its name. A wrong number is worse than a missing one.
+    #
+    # 24h covers the 5m/1h and 30m/6h page windows properly and makes the 2h/24h
+    # ticket window honest once the cluster has been up a day. The 6h/72h window
+    # still cannot be satisfied here and is not expected to be: a 72h window on a
+    # cluster that lives for an afternoon is meaningless either way, and the chaos
+    # experiments all target the page windows. See docs/slo-methodology.md.
+    #
+    # Cost at 30s scrape is a few hundred MB of the node's disk.
+    retention: 24h
+    replicas: 1
+
+    # No PVC. kind's default storage class is host-path on the node's disk, and
+    # a PVC that survives `kind delete cluster` is a lie anyway. storageSpec left
+    # unset means emptyDir: Prometheus restarts empty, which for a run measured
+    # in hours is the honest behaviour.
+    storageSpec: {}
+
+    # Halves WAL disk churn on a laptop for a few percent of CPU.
+    walCompression: true
+
+    # Required for the exemplar wiring below to do anything. Without this flag
+    # Prometheus parses exemplars off the OpenMetrics exposition and then throws
+    # them away, so the Grafana "View trace" button never appears on a panel.
+    enableFeatures:
+      - exemplar-storage
+
+    resources:
+      requests:
+        cpu: 200m
+        memory: 512Mi
+      limits:
+        # No CPU limit: throttling Prometheus during rule evaluation stretches
+        # evaluation past the interval and shows up as gaps in the SLI series.
+        memory: 1536Mi
+
+# --- Control-plane scrape targets ------------------------------------------
+# kind runs etcd, the scheduler, the controller-manager and kube-proxy bound to
+# 127.0.0.1 inside the control-plane container. The chart's ServiceMonitors
+# target them anyway and stay permanently down, which paints four red rows in
+# the Prometheus targets page and fires KubeSchedulerDown / KubeProxyDown
+# forever. Both are the first things a reviewer sees, and neither says anything
+# true about this platform.
+kubeEtcd:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeControllerManager:
+  enabled: false
+kubeProxy:
+  enabled: false
+
+# kubelet, apiserver and coredns are all reachable on kind and their metrics
+# feed the pod-level panels, so they stay on.
+kubelet:
+  enabled: true
+kubeApiServer:
+  enabled: true
+coreDns:
+  enabled: true
+kubeStateMetrics:
+  enabled: true
+nodeExporter:
+  enabled: true
+
+defaultRules:
+  create: true
+  rules:
+    # Mirror the disabled components above. Leaving these on would generate
+    # alerting rules whose expressions reference series that are never scraped;
+    # most evaluate to no-data rather than firing, but a few (the "*Down" ones)
+    # use absent() and fire immediately.
+    etcd: false
+    kubeControllerManager: false
+    kubeProxy: false
+    kubeSchedulerAlerting: false
+    kubeSchedulerRecording: false
+    windows: false
+
+# --- Alertmanager -----------------------------------------------------------
+# Kept, not disabled. The chaos harness reads GET /api/v2/alerts from
+# kube-prometheus-stack-alertmanager.monitoring:9093 to timestamp when a
+# burn-rate alert fired, which is one of the numbers in evidence/. Alertmanager
+# is therefore part of the measurement apparatus, not a notification convenience.
+#
+# Routing all severities to the built-in 'null' receiver means nothing is
+# delivered anywhere, but every alert still shows up in the API and the UI.
+alertmanager:
+  enabled: true
+  config:
+    global:
+      # Default is 5m. Shorter makes a recovered alert disappear from the API
+      # closer to when it actually recovered, which tightens the MTTR figure.
+      resolve_timeout: 2m
+    route:
+      # Group by service so a storefront burn and a catalog burn are separate
+      # entries rather than one namespace-wide blob.
+      group_by: ["alertname", "service", "severity"]
+      # Chart defaults are 30s/5m/12h, tuned for humans on a pager. These are
+      # tuned for a harness polling on a 10s loop during a 20-minute experiment.
+      group_wait: 10s
+      group_interval: 1m
+      repeat_interval: 1h
+      receiver: "null"
+      routes:
+        - receiver: "null"
+          matchers:
+            - alertname = "Watchdog"
+    receivers:
+      - name: "null"
+    # inhibit_rules are inherited from the chart defaults, and one of them
+    # matters here: severity=critical inhibits severity=warning when namespace
+    # and alertname match. Sloth emits the page and ticket alerts for one SLO
+    # under the same alertname, so during a fast burn the ticket alert appears
+    # in /api/v2/alerts with status.state = "suppressed", not "active". That is
+    # correct SRE behaviour — you page once — but the harness has to read
+    # status.state rather than assume everything returned is firing.
+  alertmanagerSpec:
+    replicas: 1
+    # emptyDir. Notification-log and silence state are lost on restart; neither
+    # is evidence.
+    storage: {}
+    resources:
+      requests:
+        cpu: 25m
+        memory: 64Mi
+      limits:
+        memory: 192Mi
+
+# --- Grafana ----------------------------------------------------------------
+grafana:
+  enabled: true
+  adminUser: admin
+  # Demo credential, deliberately self-describing so nobody reading this public
+  # repo has to wonder whether a real secret leaked. Grafana is ClusterIP-only
+  # and reached by port-forward in both environments.
+  adminPassword: demo-not-a-secret
+
+  defaultDashboardsEnabled: true
+  defaultDashboardsTimezone: utc
+
+  sidecar:
+    dashboards:
+      enabled: true
+      # The contract with gitops/platform/dashboards/kustomization.yaml, which
+      # stamps exactly this label onto the generated ConfigMaps.
+      label: grafana_dashboard
+      labelValue: "1"
+      searchNamespace: ALL
+      provider:
+        # Dashboards are Git state. Letting the UI overwrite them would put the
+        # cluster ahead of the repo with no way to get the change back.
+        allowUiUpdates: false
+
+    datasources:
+      enabled: true
+      defaultDatasourceEnabled: true
+      isDefaultDatasource: true
+      uid: prometheus
+      # Metric-to-trace correlation. The chart renders this into the Prometheus
+      # datasource's jsonData.exemplarTraceIdDestinations. traceIdLabelName is
+      # the exemplar *label* the app attaches to a histogram observation, which
+      # docs/conventions.md fixes as trace_id.
+      exemplarTraceIdDestinations:
+        datasourceUid: tempo
+        traceIdLabelName: trace_id
+        urlDisplayLabel: View trace
+
+  # Loki and Tempo are separate charts, so their datasources have to be declared
+  # here rather than discovered. The uids are fixed strings because the exemplar
+  # config above and the derived field below both reference them by uid.
+  additionalDataSources:
+    - name: Loki
+      type: loki
+      uid: loki
+      access: proxy
+      # Single-binary Loki with the gateway disabled: the chart's own Service,
+      # port 3100.
+      url: http://loki.monitoring.svc.cluster.local:3100
+      jsonData:
+        derivedFields:
+          # Log-to-trace correlation, two matchers on purpose.
+          #
+          # Logs reach Loki over OTLP, and Loki lifts a log record's TraceId into
+          # structured metadata under the key trace_id — that is what the label
+          # matcher picks up, and it is the path that should normally fire.
+          - name: TraceID
+            matcherType: label
+            matcherRegex: trace_id
+            url: "${__value.raw}"
+            datasourceUid: tempo
+            urlDisplayLabel: View trace
+          # Fallback for any line that arrived as a raw JSON body instead —
+          # docs/conventions.md guarantees trace_id is a top-level field there.
+          # Costs nothing when the label matcher already matched.
+          - name: TraceIDFromBody
+            matcherRegex: '"trace_id"\s*:\s*"([a-f0-9]{32})"'
+            url: "${__value.raw}"
+            datasourceUid: tempo
+            urlDisplayLabel: View trace
+
+    - name: Tempo
+      type: tempo
+      uid: tempo
+      access: proxy
+      # 3200, not 3100. The tempo chart names this port tempo-prom-metrics but
+      # it is the Tempo HTTP API that Grafana queries.
+      url: http://tempo.monitoring.svc.cluster.local:3200
+      jsonData:
+        # Trace-to-log, the return direction. Tags map the OTel resource
+        # attribute to the Loki label OTLP ingestion produces for it.
+        tracesToLogsV2:
+          datasourceUid: loki
+          spanStartTimeShift: -5m
+          spanEndTimeShift: 5m
+          filterByTraceID: true
+          filterBySpanID: false
+          tags:
+            - key: service.name
+              value: service_name
+        nodeGraph:
+          enabled: true
+        # serviceMap and tracesToMetrics are deliberately absent: both need
+        # Tempo's metrics-generator, which is off (see the tempo values file).
+
+  grafana.ini:
+    analytics:
+      # An offline kind cluster cannot reach grafana.com, so the version check
+      # just adds a failing outbound request every few hours — and when it does
+      # succeed it puts an "update available" banner across the top of every
+      # screenshot.
+      check_for_updates: false
+      reporting_enabled: false
+    news:
+      news_feed_enabled: false
+
+  # ClusterIP; reached with `kubectl -n monitoring port-forward svc/kube-prometheus-stack-grafana 3000:80`.
+  service:
+    type: ClusterIP
+
+  persistence:
+    # Every dashboard and datasource is provisioned from Git, so there is
+    # nothing in Grafana's SQLite worth keeping across a restart.
+    enabled: false
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 384Mi
+
+prometheusOperator:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 256Mi

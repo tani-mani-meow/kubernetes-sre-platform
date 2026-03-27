@@ -1,0 +1,83 @@
+# ingress-nginx 4.15.1 — kind.
+#
+# kind has no cloud load-balancer, so a Service of type LoadBalancer would sit
+# Pending forever. The standard kind approach instead pins the controller to the
+# control-plane node and binds ports 80/443 on that node directly; the kind
+# cluster config (owned by infra/) maps host 80/443 through with
+# extraPortMappings and labels that node ingress-ready=true.
+
+controller:
+  # A single Deployment pinned to one node, not a DaemonSet. Only the
+  # control-plane node has the host port mapping, so a DaemonSet would schedule
+  # two more replicas onto workers where nothing can reach them.
+  replicaCount: 1
+
+  hostPort:
+    enabled: true
+    ports:
+      http: 80
+      https: 443
+
+  # The label the kind cluster config puts on the control-plane node. If it is
+  # missing the controller stays Pending with "0/3 nodes match node selector",
+  # which is the usual reason `curl localhost` returns connection refused.
+  nodeSelector:
+    kubernetes.io/os: linux
+    ingress-ready: "true"
+
+  # ...and the taint that keeps ordinary workloads off that node.
+  tolerations:
+    - key: node-role.kubernetes.io/control-plane
+      operator: Equal
+      effect: NoSchedule
+    - key: node-role.kubernetes.io/master
+      operator: Equal
+      effect: NoSchedule
+
+  service:
+    # NodePort rather than LoadBalancer: traffic actually arrives via hostPort,
+    # but the chart still wants a Service for the admission webhook and the
+    # metrics endpoint. NodePort is the type that does not block on a cloud
+    # provider that does not exist.
+    type: NodePort
+
+  publishService:
+    # Nothing to publish — there is no LoadBalancer whose address could be
+    # written into Ingress status.
+    enabled: false
+
+  extraArgs:
+    # Without this every Ingress keeps an empty status.loadBalancer forever,
+    # which makes `kubectl get ingress` look like the controller is not working.
+    publish-status-address: localhost
+
+  ingressClassResource:
+    name: nginx
+    enabled: true
+    # The only ingress controller in the cluster. Making it the default means
+    # the service Ingresses do not have to name it.
+    default: true
+
+  # Picks up Ingress objects written before ingressClassName became mandatory.
+  # Harmless here, and it removes one class of "why is my Ingress ignored".
+  watchIngressWithoutClass: true
+
+  metrics:
+    enabled: true
+    serviceMonitor:
+      # Gives request rate and latency at the edge, which is the outside view of
+      # the same traffic the storefront SLI measures from the inside. Useful for
+      # showing that a chaos experiment is visible at both layers.
+      enabled: true
+
+  # Chart default is 300s. On a cluster that gets torn down and rebuilt between
+  # experiments, five minutes of graceful drain per teardown is most of the
+  # iteration loop.
+  terminationGracePeriodSeconds: 30
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      memory: 384Mi

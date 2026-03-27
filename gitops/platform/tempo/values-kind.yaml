@@ -1,0 +1,72 @@
+# Tempo chart 1.24.4 (single binary) — kind.
+#
+# Written to by the OTel Collector at tempo.monitoring.svc.cluster.local:4317.
+# Read by Grafana at tempo.monitoring.svc.cluster.local:3200 — the chart calls
+# that port `tempo-prom-metrics`, but it is the Tempo HTTP API, not a metrics
+# sidecar. Pointing the datasource at 3100 out of Loki habit is the easiest
+# mistake to make here.
+
+tempo:
+  # Matches the chart default; stated because it is a number a reviewer will
+  # look for, and because it needs to stay in step with Loki's retention so a
+  # log line and its trace expire together.
+  retention: 24h
+
+  # Chart default is 1024, i.e. a 1GB Go heap ballast reserved up front. On a
+  # kind node that is most of the headroom the rest of the stack needs, for a
+  # GC optimisation that only matters at ingest rates this cluster will never see.
+  memBallastSizeMbs: 64
+
+  storage:
+    trace:
+      backend: local
+      local:
+        path: /var/tempo/traces
+      wal:
+        path: /var/tempo/wal
+
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
+    # The chart's jaeger and opencensus receivers are deliberately left at their
+    # defaults rather than set to null. templates/_ports.tpl dereferences
+    # .Values.tempo.receivers.jaeger.protocols.thrift_compact with no nil guard,
+    # so nulling them fails template rendering outright. They bind ports nothing
+    # sends to, which costs a few listening sockets and nothing else.
+
+  metricsGenerator:
+    # Off. It would give the Grafana service graph and RED metrics derived from
+    # spans, which sounds attractive until you notice this project already has
+    # RED metrics — scraped in-process per docs/conventions.md, with exact
+    # SLO-aligned histogram buckets. Span-derived duplicates would disagree with
+    # the SLIs (different sampling, different bucket edges) and a dashboard where
+    # two latency numbers disagree is worse than one with a single number.
+    #
+    # It also needs a remote_write target, which means opening Prometheus for
+    # writes. Not worth it.
+    enabled: false
+
+  reportingEnabled: false
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 192Mi
+    limits:
+      memory: 640Mi
+
+persistence:
+  enabled: true
+  # kind local-path: a directory on the node, allocated lazily.
+  size: 5Gi
+
+serviceMonitor:
+  # Tempo's own metrics (ingested spans, failed pushes) are what tells you the
+  # trace pipeline is healthy when a trace does not show up in Grafana. Works
+  # because the Prometheus in this stack selects ServiceMonitors with a nil
+  # selector — see the kube-prometheus-stack values.
+  enabled: true
