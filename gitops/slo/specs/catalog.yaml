@@ -1,0 +1,81 @@
+# See storefront.yaml for why this uses the PrometheusServiceLevel CRD form.
+apiVersion: sloth.slok.dev/v1
+kind: PrometheusServiceLevel
+metadata:
+  name: catalog-slo
+  namespace: monitoring
+spec:
+  service: "catalog"
+
+  # catalog gets the tightest targets in the platform: it does the least work per
+  # request, and it is the only service whose readiness depends on something external,
+  # which makes it where a Postgres failure becomes visible first.
+  labels:
+    tier: "data"
+    part_of: "k8s-slo-platform"
+
+  slos:
+    - name: "availability"
+      objective: 99.9
+      description: >-
+        Proportion of catalog requests that did not fail with a server error. 99.9% over
+        30 days is a 43m error budget. Tighter than storefront because catalog failures
+        propagate: storefront cannot degrade around a missing product the way it
+        degrades around missing recommendations.
+
+      sli:
+        events:
+          # 409 (insufficient stock) and 404 stay out of the numerator. Both are the
+          # service correctly refusing an impossible request.
+          errorQuery: sum(rate(http_requests_total{service="catalog", status_code=~"5.."}[{{.window}}]))
+          totalQuery: sum(rate(http_requests_total{service="catalog"}[{{.window}}]))
+
+      alerting:
+        name: CatalogAvailabilitySLOBurn
+        labels:
+          category: availability
+          service: catalog
+        annotations:
+          summary: "catalog is burning its availability error budget"
+          runbook_url: "https://github.com/tani-mani-meow/k8s-slo-platform/blob/main/docs/runbooks/availability-burn.md"
+        pageAlert:
+          labels:
+            severity: page
+        ticketAlert:
+          labels:
+            severity: ticket
+
+    - name: "latency"
+      objective: 99.0
+      description: >-
+        Proportion of catalog requests served in under 200ms. A single indexed query
+        against a local Postgres should be far under this; the threshold is set where a
+        connection-pool problem or a missing index becomes visible, not where normal
+        operation sits.
+
+        99% rather than 95%, matching the other two: at a 5% budget the page threshold
+        works out to 72% of requests being slow, which would let a serious regression sit
+        unreported for the better part of an hour.
+
+      sli:
+        events:
+          errorQuery: |
+            sum(rate(http_request_duration_seconds_count{service="catalog"}[{{.window}}]))
+            -
+            sum(rate(http_request_duration_seconds_bucket{service="catalog", le="0.2"}[{{.window}}]))
+          totalQuery: sum(rate(http_request_duration_seconds_count{service="catalog"}[{{.window}}]))
+
+      alerting:
+        name: CatalogLatencySLOBurn
+        labels:
+          category: latency
+          service: catalog
+        annotations:
+          summary: "catalog is burning its latency error budget (target: 99% under 200ms)"
+          runbook_url: "https://github.com/tani-mani-meow/k8s-slo-platform/blob/main/docs/runbooks/latency-burn.md"
+        pageAlert:
+          labels:
+            severity: page
+        ticketAlert:
+          labels:
+            severity: ticket

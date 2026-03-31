@@ -1,0 +1,79 @@
+# See storefront.yaml for why this uses the PrometheusServiceLevel CRD form.
+apiVersion: sloth.slok.dev/v1
+kind: PrometheusServiceLevel
+metadata:
+  name: recs-slo
+  namespace: monitoring
+spec:
+  service: "recs"
+
+  # recs is the deliberately slow dependency, so it gets the loosest targets here.
+  # Holding it to storefront's numbers would mean alerting on the behaviour it was
+  # built to have.
+  labels:
+    tier: "enrichment"
+    part_of: "k8s-slo-platform"
+
+  slos:
+    - name: "availability"
+      objective: 99.0
+      description: >-
+        Proportion of recs requests that did not fail with a server error. 99% over 30
+        days is a 7h 12m budget, the loosest here, because storefront degrades around a
+        recs failure rather than failing with it. A recs outage costs recommendations on
+        a product page, not the product page.
+
+      sli:
+        events:
+          errorQuery: sum(rate(http_requests_total{service="recs", status_code=~"5.."}[{{.window}}]))
+          totalQuery: sum(rate(http_requests_total{service="recs"}[{{.window}}]))
+
+      alerting:
+        name: RecsAvailabilitySLOBurn
+        labels:
+          category: availability
+          service: recs
+        annotations:
+          summary: "recs is burning its availability error budget"
+          runbook_url: "https://github.com/tani-mani-meow/k8s-slo-platform/blob/main/docs/runbooks/availability-burn.md"
+        pageAlert:
+          labels:
+            severity: page
+        ticketAlert:
+          labels:
+            severity: ticket
+
+    - name: "latency"
+      objective: 99.0
+      description: >-
+        Proportion of recs requests served in under 800ms. recs sleeps ~250ms by design
+        with a 2% tail around 650ms, so this threshold sits just above the natural tail:
+        tight enough that added latency trips it, loose enough that the built-in tail
+        does not.
+
+        99% rather than 95% for the same reason as storefront: a 5% budget puts the page
+        threshold at 72% of requests slow, which is not a latency alert so much as an
+        outage alert wearing one's clothes.
+
+      sli:
+        events:
+          errorQuery: |
+            sum(rate(http_request_duration_seconds_count{service="recs"}[{{.window}}]))
+            -
+            sum(rate(http_request_duration_seconds_bucket{service="recs", le="0.8"}[{{.window}}]))
+          totalQuery: sum(rate(http_request_duration_seconds_count{service="recs"}[{{.window}}]))
+
+      alerting:
+        name: RecsLatencySLOBurn
+        labels:
+          category: latency
+          service: recs
+        annotations:
+          summary: "recs is burning its latency error budget (target: 99% under 800ms)"
+          runbook_url: "https://github.com/tani-mani-meow/k8s-slo-platform/blob/main/docs/runbooks/latency-burn.md"
+        pageAlert:
+          labels:
+            severity: page
+        ticketAlert:
+          labels:
+            severity: ticket

@@ -1,0 +1,99 @@
+# Sloth SLO definition, compiled to a PrometheusRule by `make slo-gen`.
+#
+# The PrometheusServiceLevel form is used rather than Sloth's raw `prometheus/v1` form
+# because this cluster runs the Prometheus Operator: the CRD form compiles to a
+# PrometheusRule object Argo CD can sync, while the raw form emits a bare `groups:`
+# file that would need a ConfigMap and a Prometheus reload to land.
+#
+# Sloth is run at build time and its output is committed (gitops/slo/generated/). No
+# Sloth controller runs in the cluster - one less moving part, and the generated
+# multi-window rules stay reviewable in a pull request.
+apiVersion: sloth.slok.dev/v1
+kind: PrometheusServiceLevel
+metadata:
+  name: storefront-slo
+  namespace: monitoring
+spec:
+  service: "storefront"
+
+  # storefront is the only service behind the Ingress, so these are the SLIs a customer
+  # would actually feel. Everything else in the platform exists to explain a burn here.
+  labels:
+    tier: "edge"
+    part_of: "k8s-slo-platform"
+
+  slos:
+    - name: "availability"
+      objective: 99.5
+      description: >-
+        Proportion of storefront requests that did not fail with a server error.
+        99.5% over 30 days leaves a 3h 36m error budget: small enough to be meaningful,
+        large enough that a chaos experiment can burn a visible slice of it in an
+        afternoon. A 99.99% target would leave 4m 20s and could not be demonstrated.
+
+      sli:
+        events:
+          # 4xx is deliberately excluded. A client asking for a product that does not
+          # exist is not the service failing, and counting it would let a load
+          # generator bug burn a budget meant to measure reliability.
+          errorQuery: sum(rate(http_requests_total{service="storefront", status_code=~"5.."}[{{.window}}]))
+          totalQuery: sum(rate(http_requests_total{service="storefront"}[{{.window}}]))
+
+      alerting:
+        name: StorefrontAvailabilitySLOBurn
+        labels:
+          category: availability
+          service: storefront
+        annotations:
+          summary: "storefront is burning its availability error budget"
+          runbook_url: "https://github.com/tani-mani-meow/k8s-slo-platform/blob/main/docs/runbooks/availability-burn.md"
+        pageAlert:
+          labels:
+            severity: page
+        ticketAlert:
+          labels:
+            severity: ticket
+
+    - name: "latency"
+      objective: 99.0
+      description: >-
+        Proportion of storefront requests served in under 400ms. The threshold sits
+        above catalog's 200ms but below recs' 800ms because GET /products/{id} fans out
+        to both concurrently and therefore costs the slower leg, not the sum.
+
+        99%, not the 95% this started at. A 95% objective gives a 5% budget, so the
+        14.4x page threshold lands at 72% of requests being slow - an alert that only
+        fires once nearly three quarters of traffic is over the line, and one that needs
+        43 minutes of total breach to satisfy its 1h window. That is a threshold set by
+        arithmetic nobody checked rather than by intent. At 99% the budget is 1%, the
+        page threshold is 14.4% of requests slow, and a real latency regression is
+        caught in minutes. See docs/slo-methodology.md.
+
+        Steady state sits near a 0.3 burn rate: only the recs long tail exceeds 400ms,
+        and it reaches storefront through the 15% of traffic that fans out.
+
+      sli:
+        events:
+          # Bucket arithmetic, not histogram_quantile. 0.4 is an exact bucket boundary
+          # (svc_common.metrics.LATENCY_BUCKETS), so this counts slow requests instead
+          # of interpolating between buckets.
+          errorQuery: |
+            sum(rate(http_request_duration_seconds_count{service="storefront"}[{{.window}}]))
+            -
+            sum(rate(http_request_duration_seconds_bucket{service="storefront", le="0.4"}[{{.window}}]))
+          totalQuery: sum(rate(http_request_duration_seconds_count{service="storefront"}[{{.window}}]))
+
+      alerting:
+        name: StorefrontLatencySLOBurn
+        labels:
+          category: latency
+          service: storefront
+        annotations:
+          summary: "storefront is burning its latency error budget (target: 99% under 400ms)"
+          runbook_url: "https://github.com/tani-mani-meow/k8s-slo-platform/blob/main/docs/runbooks/latency-burn.md"
+        pageAlert:
+          labels:
+            severity: page
+        ticketAlert:
+          labels:
+            severity: ticket
