@@ -1,0 +1,65 @@
+# Cluster: eks
+# Chaos Mesh.
+#
+# Wave 1. Nothing in the repo depends on the chaos CRDs at sync time — the
+# experiment manifests in chaos/ are applied by the harness, not by Argo CD —
+# but the controller has to be running and its webhooks registered before the
+# first experiment, and 16 CRDs take a while to become established. Putting it
+# early means `make demo` is not waiting on it at the end.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: chaos-mesh
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/manifest-generate-paths: /gitops/platform/chaos-mesh
+spec:
+  project: default
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: chaos-mesh
+  sources:
+    - repoURL: https://charts.chaos-mesh.org
+      chart: chaos-mesh
+      targetRevision: 2.8.4
+      helm:
+        releaseName: chaos-mesh
+        valueFiles:
+          - $values/gitops/platform/chaos-mesh/values-eks.yaml
+    - repoURL: https://github.com/tani-mani-meow/k8s-slo-platform.git
+      targetRevision: main
+      ref: values
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: false
+    syncOptions:
+      - CreateNamespace=true
+      # 16 chaos CRDs, several with deeply nested schemas (Workflow embeds every
+      # other chaos kind). Same last-applied-configuration annotation overflow as
+      # kube-prometheus-stack.
+      - ServerSideApply=true
+      - RespectIgnoreDifferences=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 15s
+        factor: 2
+        maxDuration: 5m
+  ignoreDifferences:
+    # chaos-controller-manager issues its own serving cert at startup and
+    # injects the CA into both webhook configurations. The chart renders them
+    # with a placeholder.
+    - group: admissionregistration.k8s.io
+      kind: ValidatingWebhookConfiguration
+      jqPathExpressions:
+        - ".webhooks[]?.clientConfig.caBundle"
+        - ".webhooks[]?.failurePolicy"
+    - group: admissionregistration.k8s.io
+      kind: MutatingWebhookConfiguration
+      jqPathExpressions:
+        - ".webhooks[]?.clientConfig.caBundle"
+        - ".webhooks[]?.failurePolicy"

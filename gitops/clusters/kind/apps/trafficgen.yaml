@@ -1,0 +1,39 @@
+# Cluster: kind
+# The load generator.
+#
+# Wave 8, deliberately last and alone. Traffic sent while storefront is still
+# rolling out is recorded by the SLI recording rules as genuine 5xx and latency,
+# which shows up as a burn-rate spike at the very start of every capture session.
+# That spike is indistinguishable on a dashboard from one an experiment caused,
+# and it is the single easiest way to make the whole evidence set unconvincing.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: trafficgen
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  annotations:
+    argocd.argoproj.io/sync-wave: "8"
+    argocd.argoproj.io/manifest-generate-paths: /gitops/services/trafficgen
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/tani-mani-meow/k8s-slo-platform.git
+    targetRevision: main
+    path: gitops/services/trafficgen/overlays/kind
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: demo
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 15s
+        factor: 2
+        maxDuration: 3m

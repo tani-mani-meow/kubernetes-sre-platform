@@ -1,0 +1,37 @@
+# Cluster: eks
+# recs — the deliberately slow dependency (99.0% / 800ms, 5% long tail).
+#
+# Wave 6, same as catalog: both are leaf services with no dependency on each
+# other, and both carry a PodMonitor that needs the CRD from wave 0. Sharing a
+# wave lets them converge in parallel.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: recs
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  annotations:
+    argocd.argoproj.io/sync-wave: "6"
+    argocd.argoproj.io/manifest-generate-paths: /gitops/services/recs
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/tani-mani-meow/k8s-slo-platform.git
+    targetRevision: main
+    path: gitops/services/recs/overlays/eks
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: demo
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 15s
+        factor: 2
+        maxDuration: 3m

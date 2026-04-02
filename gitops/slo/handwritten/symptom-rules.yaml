@@ -1,0 +1,118 @@
+# Symptom alerts, written by hand rather than generated.
+#
+# Burn-rate alerting answers one question well - "are we spending error budget faster
+# than the policy allows" - and it deliberately answers it slowly, because a short
+# incident does not spend much budget. That is correct, and it leaves a real gap.
+#
+# Work the numbers for catalog. A 99.9% objective over 30 days is a 2,592-second budget.
+# A complete database outage lasting 50 seconds consumes 50/2592 = 1.9% of it. The
+# fast-burn page fires at 2% consumed in an hour, so a total outage of the primary
+# datastore lands just under the paging threshold and every burn-rate window stays
+# silent - correctly, by the policy as written.
+#
+# It is still a total outage. The rules below are what catches it. The pod-kill-postgres
+# scenario exists to demonstrate that gap rather than paper over it.
+#
+# These are the complement, not a replacement. Sloth's rules protect the budget; these
+# protect against events that are short enough to be invisible to it and severe enough
+# to matter anyway. Both are needed, which is the whole point of keeping them side by
+# side in one directory.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: symptom-alerts
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: k8s-slo-platform
+    app.kubernetes.io/component: slo
+spec:
+  groups:
+    - name: symptom-alerts
+      # 15s rather than the global 30s: these exist to catch short events, so the
+      # evaluation interval is part of how fast they can possibly fire.
+      interval: 15s
+      rules:
+        # ---------------------------------------------------------------------------
+        - alert: ServiceHardDown
+          expr: |
+            sum by (service) (rate(http_requests_total{service=~"storefront|catalog|recs"}[1m]))
+              > 0
+            and
+            sum by (service) (rate(http_requests_total{service=~"storefront|catalog|recs", status_code!~"5.."}[1m]))
+              == 0
+          for: 30s
+          labels:
+            severity: page
+            category: availability
+            alert_kind: symptom
+          annotations:
+            summary: "{{ $labels.service }} is failing every request"
+            description: >-
+              Every request to {{ $labels.service }} has returned a server error for the
+              last two minutes. This fires regardless of error budget: at 100% failure
+              the budget is being spent as fast as it can be, and waiting for a 1h
+              window to agree would mean an hour of total outage before anyone is told.
+            runbook_url: "https://github.com/tani-mani-meow/k8s-slo-platform/blob/main/docs/runbooks/availability-burn.md"
+
+        # ---------------------------------------------------------------------------
+        - alert: ServiceReceivingNoTraffic
+          expr: |
+            sum by (service) (rate(http_requests_total{service=~"storefront|catalog|recs"}[5m])) == 0
+          for: 3m
+          labels:
+            severity: page
+            category: availability
+            alert_kind: symptom
+          annotations:
+            summary: "{{ $labels.service }} is receiving no requests at all"
+            description: >-
+              No requests have reached {{ $labels.service }} for five minutes. Every
+              ratio-based SLI is 0/0 in this state, so the burn-rate alerts are not
+              merely quiet - they are structurally incapable of firing. Usually this
+              means the pods are NotReady and have been removed from their Service, or
+              the load generator has stopped. Either way the SLO dashboards are lying by
+              omission until it is fixed.
+            runbook_url: "https://github.com/tani-mani-meow/k8s-slo-platform/blob/main/docs/runbooks/availability-burn.md"
+
+        # ---------------------------------------------------------------------------
+        - alert: DependencyHardDown
+          # [1m] and for: 30s, not [2m]/1m. A dependency outage that resolves in under
+          # ninety seconds would otherwise never be seen at all, and Postgres pod kills
+          # in this platform recover in roughly that time - the alert has to be faster
+          # than the thing it is watching for or it is decorative.
+          expr: |
+            sum by (service, dependency) (rate(dependency_requests_total[1m])) > 0
+            and
+            sum by (service, dependency) (rate(dependency_requests_total{outcome="ok"}[1m])) == 0
+          for: 30s
+          labels:
+            severity: page
+            category: availability
+            alert_kind: symptom
+          annotations:
+            summary: "{{ $labels.service }} cannot reach {{ $labels.dependency }}"
+            description: >-
+              Every call from {{ $labels.service }} to {{ $labels.dependency }} has
+              failed for two minutes. This is the alert that names the cause rather than
+              the symptom: storefront returning 503s and catalog being unable to reach
+              Postgres are the same incident, and this one says which end to look at.
+            runbook_url: "https://github.com/tani-mani-meow/k8s-slo-platform/blob/main/docs/runbooks/availability-burn.md"
+
+        # ---------------------------------------------------------------------------
+        - alert: SLOBudgetNearlyExhausted
+          # Not a burn-rate alert: a level check on what is left. A service can sit just
+          # under every burn-rate threshold for days and still arrive at zero budget,
+          # and no rate-based rule would ever mention it.
+          expr: slo:period_error_budget_remaining:ratio < 0.10
+          for: 15m
+          labels:
+            severity: ticket
+            category: budget
+            alert_kind: symptom
+          annotations:
+            summary: "{{ $labels.sloth_service }} {{ $labels.sloth_slo }} has under 10% of its error budget left"
+            description: >-
+              {{ $labels.sloth_id }} has consumed more than 90% of its 30-day error
+              budget. Nothing is on fire; this is the signal to stop shipping risk to
+              this service until the window rolls over.
+            runbook_url: "https://github.com/tani-mani-meow/k8s-slo-platform/blob/main/docs/runbooks/availability-burn.md"

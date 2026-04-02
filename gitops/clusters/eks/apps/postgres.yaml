@@ -1,0 +1,55 @@
+# Cluster: eks
+# Postgres StatefulSet + seed Job.
+#
+# Wave 5 — ahead of catalog (wave 6), which fails its readiness probe until the
+# database answers. Kubernetes would retry catalog until Postgres came up
+# regardless, but the retries land as CrashLoopBackOff / NotReady in the Argo CD
+# UI and in `kubectl get pods`, which is exactly the noise a Day-2 demo should
+# not open with.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: postgres
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  annotations:
+    argocd.argoproj.io/sync-wave: "5"
+    # Covers base/ and every overlay, so a change to the shared base refreshes
+    # this app even though the source path is the overlay directory.
+    argocd.argoproj.io/manifest-generate-paths: /gitops/services/postgres
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/tani-mani-meow/k8s-slo-platform.git
+    targetRevision: main
+    path: gitops/services/postgres/overlays/eks
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: demo
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      # Keep the ignored fields out of the applied patch as well as out of the
+      # diff, so selfHeal never fights the API server over them.
+      - RespectIgnoreDifferences=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 15s
+        factor: 2
+        maxDuration: 3m
+  ignoreDifferences:
+    # The API server strips apiVersion/kind from each entry in
+    # spec.volumeClaimTemplates on write, so the live object never matches what
+    # Kustomize renders and the StatefulSet sits permanently OutOfSync. With
+    # selfHeal on that becomes a sync every few seconds against a field that can
+    # never converge.
+    - group: apps
+      kind: StatefulSet
+      jqPathExpressions:
+        - ".spec.volumeClaimTemplates[]?.apiVersion"
+        - ".spec.volumeClaimTemplates[]?.kind"

@@ -1,0 +1,86 @@
+# Cluster: kind
+# Prometheus + Alertmanager + Grafana + the Prometheus Operator.
+#
+# Wave 0 — everything downstream needs the CRDs this chart installs.
+# PodMonitor is referenced by the storefront/catalog/recs manifests (wave 6-7),
+# PrometheusRule by the Sloth output in gitops/slo/generated (wave 4), and the
+# Grafana dashboard sidecar has to be watching before the dashboard ConfigMaps
+# appear (wave 4). Sync this second and the first reconcile of half the repo
+# fails with "no matches for kind PodMonitor".
+#
+# Multi-source rather than vendored values: the chart stays at its upstream
+# repo (nothing to re-vendor on a version bump) while the values file lives in
+# this repo and is reviewed in the same PR as the code it configures. The
+# second source carries `ref: values` and no `path`, so it contributes no
+# manifests — it only gives `$values` something to resolve against.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: kube-prometheus-stack
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+    # Skip re-rendering this chart unless its values changed. Note the known
+    # limit: for a multi-source app the annotation only covers the Git source,
+    # so a new chart version still requires the targetRevision bump below.
+    argocd.argoproj.io/manifest-generate-paths: /gitops/platform/kube-prometheus-stack
+spec:
+  project: default
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  sources:
+    - repoURL: https://prometheus-community.github.io/helm-charts
+      chart: kube-prometheus-stack
+      targetRevision: 88.6.2
+      helm:
+        # Pinned explicitly. Service DNS names are derived from the release
+        # name, and the Grafana/Alertmanager endpoints the chaos harness and the
+        # datasource config point at must not move if this Application is ever
+        # renamed.
+        releaseName: kube-prometheus-stack
+        valueFiles:
+          - $values/gitops/platform/kube-prometheus-stack/values-kind.yaml
+    - repoURL: https://github.com/tani-mani-meow/k8s-slo-platform.git
+      targetRevision: main
+      ref: values
+  syncPolicy:
+    automated:
+      prune: true
+      # Off for the Helm platform apps. The admission-webhook CA below is
+      # rewritten in-cluster by a Job; if any mutation slips past the
+      # ignoreDifferences rules, selfHeal turns a cosmetic diff into a sync loop
+      # that never settles. Drift reversion is demonstrated on the app services,
+      # where it is the point.
+      selfHeal: false
+    syncOptions:
+      - CreateNamespace=true
+      # The Prometheus Operator CRDs are ~1MB of OpenAPI schema. A client-side
+      # apply stores the whole manifest in the
+      # kubectl.kubernetes.io/last-applied-configuration annotation, which blows
+      # the 262144-byte annotation limit and fails the sync outright. Server-side
+      # apply keeps the schema in managedFields instead.
+      - ServerSideApply=true
+      - RespectIgnoreDifferences=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 15s
+        factor: 2
+        maxDuration: 5m
+  ignoreDifferences:
+    # The chart ships an empty caBundle and a Job patches the real cert in after
+    # install. Git can never match that. failurePolicy is unset in the template
+    # and defaulted to Fail by the API server, so it diffs for the same reason.
+    - group: admissionregistration.k8s.io
+      kind: ValidatingWebhookConfiguration
+      jqPathExpressions:
+        - ".webhooks[]?.clientConfig.caBundle"
+        - ".webhooks[]?.failurePolicy"
+    - group: admissionregistration.k8s.io
+      kind: MutatingWebhookConfiguration
+      jqPathExpressions:
+        - ".webhooks[]?.clientConfig.caBundle"
+        - ".webhooks[]?.failurePolicy"

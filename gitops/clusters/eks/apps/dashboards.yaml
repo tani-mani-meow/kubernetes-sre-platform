@@ -1,0 +1,45 @@
+# Cluster: eks
+# Grafana dashboards, wrapped into ConfigMaps by Kustomize.
+#
+# Wave 4 — the Grafana sidecar installed in wave 0 has to be watching before
+# these ConfigMaps land. The sidecar does a live watch, so a ConfigMap that
+# appeared first would eventually be picked up on resync, but "eventually" is
+# not a property you want between `make demo` finishing and someone opening
+# Grafana.
+#
+# Environment-independent: the same five dashboards render against kind and EKS,
+# so both clusters point at the same path. Only the datasource UIDs matter and
+# those are fixed in the kube-prometheus-stack values.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: dashboards
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  annotations:
+    argocd.argoproj.io/sync-wave: "4"
+    argocd.argoproj.io/manifest-generate-paths: /gitops/platform/dashboards
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/tani-mani-meow/k8s-slo-platform.git
+    targetRevision: main
+    path: gitops/platform/dashboards
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  syncPolicy:
+    automated:
+      prune: true
+      # Grafana lets you edit a provisioned dashboard in the UI but not save it
+      # back to the ConfigMap, so there is nothing here that legitimately drifts.
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 15s
+        factor: 2
+        maxDuration: 3m

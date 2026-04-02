@@ -1,0 +1,43 @@
+# Cluster: kind
+# catalog — the Postgres-backed service, tightest SLO (99.9% / 200ms).
+#
+# Wave 6 — after Postgres (wave 5) and after kube-prometheus-stack (wave 0),
+# which owns the PodMonitor CRD this overlay's PodMonitor is an instance of.
+# That second dependency is the hard one: a PodMonitor applied before its CRD
+# exists aborts the whole Application sync, not just that resource.
+#
+# selfHeal is on for every app service. The drift-detection demo is
+# `kubectl -n demo edit deploy/catalog`, change the replica count or an env var,
+# and watch Argo CD put it back — so this flag is a feature under test, not a
+# convenience.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: catalog
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  annotations:
+    argocd.argoproj.io/sync-wave: "6"
+    argocd.argoproj.io/manifest-generate-paths: /gitops/services/catalog
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/tani-mani-meow/k8s-slo-platform.git
+    targetRevision: main
+    path: gitops/services/catalog/overlays/kind
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: demo
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 15s
+        factor: 2
+        maxDuration: 3m

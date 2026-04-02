@@ -1,0 +1,52 @@
+# Cluster: eks
+# The PrometheusRule objects Sloth compiles from gitops/slo/specs.
+#
+# Wave 4 — after kube-prometheus-stack (wave 0) has established the
+# PrometheusRule CRD and after Prometheus itself is running, but before the app
+# services (wave 6+). Loading the rules first means the recording rules for the
+# SLIs start evaluating the moment the first request is served, so the burn-rate
+# windows in docs/conventions.md are measuring from t=0 rather than from
+# whenever Argo CD got round to this app.
+#
+# Single source, no Helm: the rules are committed YAML, generated at build time
+# and reviewed as a diff. That is the whole point of compiling Sloth specs in CI
+# rather than running a generator in the cluster.
+#
+# No `directory:` or `kustomize:` block on purpose — gitops/slo/generated is
+# owned by another agent and may or may not gain a kustomization.yaml. Leaving
+# the source type unset lets Argo CD detect it from the files present; pinning
+# it here would break the moment the directory layout changed.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: slo-rules
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  annotations:
+    argocd.argoproj.io/sync-wave: "4"
+    argocd.argoproj.io/manifest-generate-paths: /gitops/slo
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/tani-mani-meow/k8s-slo-platform.git
+    targetRevision: main
+    path: gitops/slo
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  syncPolicy:
+    automated:
+      prune: true
+      # Rules are pure declarative config with no controller mutating them, so
+      # selfHeal is free here and closes the "someone silenced an SLO by editing
+      # the rule in-cluster" hole.
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 15s
+        factor: 2
+        maxDuration: 3m

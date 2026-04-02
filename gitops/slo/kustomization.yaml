@@ -1,0 +1,12 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# What Argo CD actually deploys for alerting: the Sloth-compiled burn-rate rules plus
+# the hand-written symptom rules.
+#
+# specs/ is deliberately not here. Those are PrometheusServiceLevel custom resources,
+# and no Sloth controller runs in this cluster - they are compiler input, not manifests.
+# Syncing them would ask the API server to accept a CRD that does not exist.
+resources:
+  - generated
+  - handwritten

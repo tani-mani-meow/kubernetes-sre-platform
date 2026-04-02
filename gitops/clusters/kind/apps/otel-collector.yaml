@@ -1,0 +1,49 @@
+# Cluster: kind
+# OpenTelemetry Collector, gateway mode.
+#
+# Wave 3 — strictly after Loki and Tempo (wave 2), because its exporters point
+# at both and a collector that starts first spends its opening minutes logging
+# connection refused.
+#
+# Wave 3 is also strictly before the app services (wave 6+): the services set
+# OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector.monitoring:4318 per
+# docs/conventions.md, and their SDKs retry-with-backoff rather than fail, but
+# the first traces of the run are the ones the demo screenshots.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: otel-collector
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+    argocd.argoproj.io/manifest-generate-paths: /gitops/platform/otel-collector
+spec:
+  project: default
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  sources:
+    - repoURL: https://open-telemetry.github.io/opentelemetry-helm-charts
+      chart: opentelemetry-collector
+      targetRevision: 0.172.0
+      helm:
+        releaseName: otel-collector
+        valueFiles:
+          - $values/gitops/platform/otel-collector/values-kind.yaml
+    - repoURL: https://github.com/tani-mani-meow/k8s-slo-platform.git
+      targetRevision: main
+      ref: values
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: false
+    syncOptions:
+      - CreateNamespace=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 15s
+        factor: 2
+        maxDuration: 5m

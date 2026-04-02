@@ -1,0 +1,55 @@
+# Cluster: eks
+# ingress-nginx.
+#
+# Wave 1 — after the CRD providers, before anything that creates an Ingress.
+# An Ingress applied with no controller present is not an error, it just sits
+# there with an empty status, so this is ordering for a clean first sync rather
+# than a hard dependency. The real reason it is early: the IngressClass it
+# creates must exist before the service Ingresses name it, otherwise the
+# admission webhook (also installed here) rejects them.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: ingress-nginx
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/manifest-generate-paths: /gitops/platform/ingress-nginx
+spec:
+  project: default
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: ingress-nginx
+  sources:
+    - repoURL: https://kubernetes.github.io/ingress-nginx
+      chart: ingress-nginx
+      targetRevision: 4.15.1
+      helm:
+        releaseName: ingress-nginx
+        valueFiles:
+          - $values/gitops/platform/ingress-nginx/values-eks.yaml
+    - repoURL: https://github.com/tani-mani-meow/k8s-slo-platform.git
+      targetRevision: main
+      ref: values
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: false
+    syncOptions:
+      - CreateNamespace=true
+      - RespectIgnoreDifferences=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 15s
+        factor: 2
+        maxDuration: 5m
+  ignoreDifferences:
+    # ingress-nginx-admission-create/patch Jobs generate a self-signed cert and
+    # write its CA into the webhook config after the chart renders an empty one.
+    - group: admissionregistration.k8s.io
+      kind: ValidatingWebhookConfiguration
+      jqPathExpressions:
+        - ".webhooks[]?.clientConfig.caBundle"

@@ -1,0 +1,20 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Sloth output, committed rather than generated in-cluster. Regenerate with
+# `make slo-gen` after editing anything in ../specs; CI fails if the two drift.
+#
+# Committing the output is what keeps the multi-window burn-rate rules reviewable: the
+# spec says "99.5%", the diff says what that means in PromQL.
+namespace: monitoring
+
+resources:
+  - storefront-rules.yaml
+  - catalog-rules.yaml
+  - recs-rules.yaml
+
+labels:
+  - includeSelectors: false
+    pairs:
+      app.kubernetes.io/part-of: k8s-slo-platform
+      app.kubernetes.io/component: slo

@@ -1,0 +1,47 @@
+# Cluster: eks
+# storefront — the edge service that fans out to catalog and recs, and the one
+# that ships as an Argo Rollout so the canary demo has somewhere to happen.
+#
+# Wave 7, the last of the workloads. Two dependencies force it there:
+#   - catalog and recs (wave 6) must exist, or the first requests through the
+#     edge return 5xx and burn error budget that no experiment asked for;
+#   - the Rollout CRD from argo-rollouts (wave 0) must be established, and its
+#     AnalysisTemplate references Prometheus, which is also wave 0.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: storefront
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  annotations:
+    argocd.argoproj.io/sync-wave: "7"
+    argocd.argoproj.io/manifest-generate-paths: /gitops/services/storefront
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/tani-mani-meow/k8s-slo-platform.git
+    targetRevision: main
+    path: gitops/services/storefront/overlays/eks
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: demo
+  syncPolicy:
+    automated:
+      prune: true
+      # The canary demo pushes a deliberately broken image tag to Git and lets
+      # Rollouts abort it. selfHeal does not interfere: Rollouts owns the
+      # ReplicaSets and the traffic weight, while Argo CD only owns the Rollout
+      # spec, which nothing mutates in-cluster.
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 15s
+        factor: 2
+        maxDuration: 3m
+  # If an HPA is ever added in front of this Rollout, /spec/replicas has to be
+  # ignored here — the HPA writes it and selfHeal would immediately scale it back.
+  # Not added now because nothing autoscales in this project.

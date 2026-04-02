@@ -1,0 +1,51 @@
+# Cluster: eks
+# Tempo, single binary.
+#
+# Wave 2, same reasoning as Loki: it is the collector's trace backend and has to
+# be listening on 4317 before wave 3.
+#
+# Chart choice: `tempo`, not `tempo-distributed`. The distributed chart splits
+# into distributor / ingester / querier / query-frontend / compactor with a
+# memberlist ring between them — six workloads and a gossip protocol to hold
+# maybe 200MB of demo traces. The single binary is one StatefulSet.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: tempo
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+    argocd.argoproj.io/manifest-generate-paths: /gitops/platform/tempo
+spec:
+  project: default
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  sources:
+    - repoURL: https://grafana.github.io/helm-charts
+      chart: tempo
+      targetRevision: 1.24.4
+      helm:
+        # Gives Service/tempo. The collector exports to tempo:4317 and Grafana
+        # queries tempo:3200 — note 3200, not 3100: this chart puts the Tempo
+        # HTTP API on the port it calls `tempo-prom-metrics`.
+        releaseName: tempo
+        valueFiles:
+          - $values/gitops/platform/tempo/values-eks.yaml
+    - repoURL: https://github.com/tani-mani-meow/k8s-slo-platform.git
+      targetRevision: main
+      ref: values
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: false
+    syncOptions:
+      - CreateNamespace=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 15s
+        factor: 2
+        maxDuration: 5m

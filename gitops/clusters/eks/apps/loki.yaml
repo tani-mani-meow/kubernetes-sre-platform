@@ -1,0 +1,53 @@
+# Cluster: eks
+# Loki, single-binary.
+#
+# Wave 2 — must be accepting writes before the OTel Collector (wave 3) starts
+# exporting to it. The collector survives an unreachable backend, but it does so
+# by filling its logs with export failures, which is the first thing a reviewer
+# sees when they check whether the pipeline works.
+#
+# Also wave 2 because the Grafana datasource pointing at it is provisioned by
+# kube-prometheus-stack in wave 0; a datasource whose backend does not resolve
+# shows a red banner on the Explore page until Loki appears.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: loki
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+    argocd.argoproj.io/manifest-generate-paths: /gitops/platform/loki
+spec:
+  project: default
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  sources:
+    - repoURL: https://grafana.github.io/helm-charts
+      chart: loki
+      targetRevision: 7.3.0
+      helm:
+        # Load-bearing. The chart's fullname helper collapses to the release
+        # name when it already contains the chart name, so releaseName: loki
+        # gives Service/loki — the host the Grafana datasource and the collector's
+        # otlphttp exporter are both hard-coded to.
+        releaseName: loki
+        valueFiles:
+          - $values/gitops/platform/loki/values-eks.yaml
+    - repoURL: https://github.com/tani-mani-meow/k8s-slo-platform.git
+      targetRevision: main
+      ref: values
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: false
+    syncOptions:
+      - CreateNamespace=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 15s
+        factor: 2
+        maxDuration: 5m
