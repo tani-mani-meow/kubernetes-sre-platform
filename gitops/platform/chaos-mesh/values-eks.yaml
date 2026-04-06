@@ -1,0 +1,51 @@
+# chaos-mesh 2.8.4 — EKS.
+
+chaosDaemon:
+  # Same values as kind, and that is not a copy-paste oversight: the stock EKS
+  # AMI (Amazon Linux 2023) runs containerd with its socket at exactly this
+  # path, so kind and EKS happen to agree. The chart's docker default is wrong
+  # on both.
+  #
+  # The exception to watch for is Bottlerocket, which puts the socket elsewhere.
+  # infra/ provisions AL2023 managed node groups, so this holds.
+  runtime: containerd
+  socketPath: /run/containerd/containerd.sock
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 512Mi
+
+controllerManager:
+  # Still 1, not the chart's 3. These clusters are destroyed the same day; a
+  # controller restart costing a few seconds of experiment scheduling is not
+  # worth two idle replicas.
+  replicaCount: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 768Mi
+
+dnsServer:
+  create: true
+
+dashboard:
+  create: true
+  service:
+    type: ClusterIP
+  # On by default and left that way. See values-kind.yaml for how to mint a
+  # login token; it matters more here, where the cluster has a real VPC and a
+  # public NLB in front of ingress-nginx.
+  securityMode: true
+  persistentVolume:
+    enabled: false
+  resources:
+    requests:
+      cpu: 50m
+      memory: 256Mi
+    limits:
+      memory: 512Mi

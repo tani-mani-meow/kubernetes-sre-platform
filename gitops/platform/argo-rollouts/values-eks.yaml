@@ -1,0 +1,36 @@
+# argo-rollouts 2.42.0 — EKS.
+#
+# Same configuration as kind with a larger resource envelope. Still one
+# controller replica: the failover the chart's default of 2 buys is worth having
+# in production and worth nothing in a cluster that exists for an afternoon.
+
+installCRDs: true
+keepCRDs: true
+clusterInstall: true
+
+controller:
+  replicas: 1
+
+  metrics:
+    enabled: true
+    serviceMonitor:
+      enabled: true
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 192Mi
+    limits:
+      memory: 512Mi
+
+dashboard:
+  enabled: true
+  replicas: 1
+  service:
+    type: ClusterIP
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 256Mi

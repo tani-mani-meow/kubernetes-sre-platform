@@ -1,0 +1,73 @@
+# chaos-mesh 2.8.4 — kind.
+
+chaosDaemon:
+  # The two settings that decide whether Chaos Mesh works at all.
+  #
+  # The chart still defaults to docker + /var/run/docker.sock, which has not
+  # been how a kind node runs containers since dockershim was removed. With the
+  # defaults chaos-daemon starts, passes its probes, and then fails every single
+  # experiment with a runtime error — it looks installed and is not.
+  runtime: containerd
+  socketPath: /run/containerd/containerd.sock
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 256Mi
+
+controllerManager:
+  # Chart default is 3, for leader-election failover across nodes. A kind
+  # cluster has three nodes total and two of the replicas would do nothing but
+  # hold a lease.
+  replicaCount: 1
+  resources:
+    requests:
+      cpu: 50m
+      memory: 256Mi
+    limits:
+      memory: 512Mi
+
+dnsServer:
+  # Kept, despite the resource budget. Only DNSChaos needs it, and the chaos
+  # suite in chaos/ is owned by another agent — turning this off here would make
+  # one of their experiment kinds fail with a confusing "dns server not found"
+  # rather than an obvious "not installed".
+  create: true
+
+dashboard:
+  create: true
+  service:
+    # Chart default is NodePort. ClusterIP + port-forward keeps the surface
+    # consistent with Grafana, Prometheus and the Rollouts dashboard:
+    #   kubectl -n chaos-mesh port-forward svc/chaos-dashboard 2333:2333
+    type: ClusterIP
+
+  # Kept ON, deliberately.
+  #
+  # With securityMode the dashboard requires a Kubernetes token to log in, and
+  # the token's ServiceAccount bounds what chaos you can create. Turning it off
+  # publishes an unauthenticated UI whose whole purpose is killing pods and
+  # partitioning networks — in a public portfolio repo that reads as an
+  # oversight even on a throwaway cluster.
+  #
+  # The cost is near zero here: the experiments are driven by kubectl from the
+  # chaos harness, not by clicking. To actually log in, the ServiceAccount and
+  # ClusterRole are NOT created by this chart — apply the RBAC manifest from the
+  # Chaos Mesh "Manage User Permissions" docs, then:
+  #   kubectl -n chaos-mesh create token <service-account> --duration=8h
+  securityMode: true
+
+  persistentVolume:
+    # Experiment history lives in a sqlite file. Losing it on restart is fine —
+    # the evidence is the Prometheus/Alertmanager timeline, not the dashboard's
+    # own record of what was clicked.
+    enabled: false
+
+  resources:
+    requests:
+      cpu: 25m
+      memory: 128Mi
+    limits:
+      memory: 256Mi

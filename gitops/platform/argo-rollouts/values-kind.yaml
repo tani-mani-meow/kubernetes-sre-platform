@@ -1,0 +1,54 @@
+# argo-rollouts 2.42.0 — kind.
+#
+# Provides the Rollout CRD that storefront uses, the controller that runs the
+# canary, and the dashboard that makes the canary visible in a screenshot.
+
+installCRDs: true
+# Chart default. Uninstalling the chart must not delete the Rollout CRD while a
+# Rollout object still exists — that would garbage-collect the running
+# storefront along with it.
+keepCRDs: true
+
+# Cluster-scoped. The controller lives in argo-rollouts and the Rollout it
+# manages lives in demo, so namespaced mode would not see it at all.
+clusterInstall: true
+
+controller:
+  # Chart default is 2, which exists for leader-election failover. One
+  # controller with no failover is the right trade on a laptop; a controller
+  # restart pauses a canary for a few seconds rather than losing it.
+  replicas: 1
+
+  metrics:
+    enabled: true
+    serviceMonitor:
+      # rollout_info_replicas_available, rollout_phase and the analysis-run
+      # counters. These are what turn "the canary aborted" into a timestamped
+      # data point for evidence/ rather than a claim.
+      #
+      # No additionalLabels needed: Prometheus here selects ServiceMonitors with
+      # a nil selector. See the kube-prometheus-stack values.
+      enabled: true
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 256Mi
+
+dashboard:
+  # Off by default in the chart. Enabled because the canary progressing through
+  # its steps, and then self-aborting, is the single clearest visual this part
+  # of the project produces.
+  enabled: true
+  replicas: 1
+  service:
+    # Port-forward: kubectl -n argo-rollouts port-forward svc/argo-rollouts-dashboard 3100:3100
+    type: ClusterIP
+  resources:
+    requests:
+      cpu: 25m
+      memory: 64Mi
+    limits:
+      memory: 128Mi
