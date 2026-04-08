@@ -1,0 +1,22 @@
+# Kill one catalog pod.
+#
+# The control experiment. Two replicas behind a readiness probe should absorb this with
+# no page, which is the result worth having: a platform that alerts every time
+# Kubernetes does its job trains its operators to ignore it.
+apiVersion: chaos-mesh.org/v1alpha1
+kind: PodChaos
+metadata:
+  name: pod-kill-catalog
+  namespace: demo
+spec:
+  action: pod-kill
+  mode: one
+  selector:
+    namespaces:
+      - demo
+    labelSelectors:
+      app.kubernetes.io/name: catalog
+  # No `duration`: pod-kill is instantaneous and irreversible. The Deployment
+  # controller replaces the pod, so recovery is Kubernetes doing its job rather than
+  # the experiment expiring.
+  gracePeriod: 0

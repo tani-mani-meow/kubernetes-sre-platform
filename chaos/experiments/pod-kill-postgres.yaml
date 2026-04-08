@@ -1,0 +1,24 @@
+# Kill the Postgres pod.
+#
+# Unlike the catalog kill, there is no second replica to absorb this: catalog loses its
+# database entirely until the pod is rescheduled and its PersistentVolume reattaches.
+# That is the honest consequence of running a single-replica StatefulSet, and the
+# scenario exists to measure it rather than to pretend otherwise.
+#
+# Recovery time here is dominated by volume detach/attach, not by anything the
+# application does - which is exactly the sort of thing that is invisible until you
+# measure it.
+apiVersion: chaos-mesh.org/v1alpha1
+kind: PodChaos
+metadata:
+  name: pod-kill-postgres
+  namespace: demo
+spec:
+  action: pod-kill
+  mode: one
+  selector:
+    namespaces:
+      - demo
+    labelSelectors:
+      app.kubernetes.io/name: postgres
+  gracePeriod: 0

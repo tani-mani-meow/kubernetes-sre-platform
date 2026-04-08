@@ -1,0 +1,245 @@
+# The chaos suite.
+#
+# Each entry is a hypothesis plus the smallest fault that tests it. `expect.alert: null`
+# is not a gap - it is a prediction that the platform absorbs the fault below the paging
+# threshold, and a scenario that quietly recovers is as much a result as one that pages.
+#
+# ---------------------------------------------------------------------------------
+# Why the durations look long
+#
+# A Sloth page alert is `short_window AND long_window`, and the long window governs. At
+# an observed error ratio `e` sustained for `d` minutes, the 1h window reads `e × d/60`,
+# and it must exceed `14.4 × (1 - objective)`. So:
+#
+#     d_min = 60 × 14.4 × (1 - objective) / e
+#
+# For storefront availability (99.5%, budget 0.005) at a 50% error rate that is 8.6
+# minutes before the alert can fire at all. An earlier version of this file injected 30%
+# for 5 minutes and expected a page in two - arithmetically impossible against the rules
+# actually committed to this repo, and the kind of mistake that produces an evidence
+# directory full of "not detected" without anything being wrong with the platform.
+#
+# The durations below are set so each expected alert has real headroom over its long
+# window. That is not a workaround; it is what the alerting policy means. A five-minute
+# blip is not supposed to page anyone.
+#
+# Faults short enough to stay under every burn-rate window are still worth running - see
+# pod-kill-postgres, where the point is that the symptom alerts catch what the budget
+# alerts correctly ignore.
+# ---------------------------------------------------------------------------------
+#
+# Fields:
+#   id             stable identifier; also the evidence directory name
+#   title          one line for the MTTR summary table
+#   hypothesis     what should happen, written before the run
+#   clusters       where it can run (node/AZ faults need real nodes)
+#   target         the workload the fault is applied to
+#   traffic_probe  which service must be serving traffic for the run to be meaningful;
+#                  defaults to `target`, set explicitly when the target emits no metrics
+#   inject         how the fault is applied - see harness/injectors.py
+#   duration_s     how long the fault is held
+#   expect.alert   alert name expected to fire, or null for "should not page"
+#   expect.sli     the recording rule used to decide recovery
+#   settle_s       how long the SLI must stay healthy before recovery is declared
+
+defaults:
+  settle_s: 180
+  # 5m rate windows mean an SLI keeps reporting a fault for ~5 minutes after it stops.
+  # Recovery is measured from when the signal returns to healthy, not from when the
+  # fault was removed, so this budget has to exceed the rate window.
+  recovery_timeout_s: 900
+  detect_timeout_s: 900
+
+scenarios:
+  - id: pod-kill-catalog
+    title: "Catalog pod killed"
+    hypothesis: >-
+      Two replicas and a readiness probe should absorb a single pod deletion. A few
+      in-flight requests may fail, but nowhere near enough to trip a burn-rate window, so
+      no page should fire. This is the control case: it proves the platform survives the
+      most common failure in Kubernetes without waking anyone up.
+    clusters: [kind, eks]
+    target: catalog
+    inject:
+      kind: chaos-mesh
+      manifest: experiments/pod-kill-catalog.yaml
+    duration_s: 30
+    expect:
+      alert: null
+      sli: catalog-availability
+
+  - id: pod-kill-postgres
+    title: "Postgres pod killed"
+    hypothesis: >-
+      Postgres is a single replica with no failover, so catalog loses its database
+      entirely until the pod is rescheduled and its PVC reattaches. catalog should go
+      NotReady rather than crash-loop, and storefront should return 503s.
+
+      The interesting prediction is about the alerting, not the outage. catalog's 99.9%
+      objective is a 2,592-second budget over 30 days, so a 50-second total outage
+      consumes 1.9% of it - just under the 2%-in-an-hour that the fast-burn page is
+      set to fire on. The Sloth alerts should therefore stay silent, and be right to.
+      DependencyHardDown should fire instead, on the storefront-to-catalog leg.
+
+      Marginal on purpose, and the marginality is the finding: whether the symptom alert
+      fires depends on how long the reschedule and volume reattach actually take against
+      a [1m] window plus a 30s `for`. If Postgres comes back in forty seconds, nothing
+      alerts at all and the honest conclusion is that a total datastore outage can pass
+      unremarked - which is worth knowing before it happens in production rather than
+      after.
+    clusters: [kind, eks]
+    target: postgres
+    # postgres emits no HTTP metrics, so the baseline check has to look at the service
+    # that actually serves traffic through it.
+    traffic_probe: catalog
+    inject:
+      kind: chaos-mesh
+      manifest: experiments/pod-kill-postgres.yaml
+    duration_s: 30
+    expect:
+      alert: DependencyHardDown
+      sli: catalog-availability
+
+  - id: latency-catalog
+    title: "500ms latency injected between storefront and catalog"
+    hypothesis: >-
+      Every catalog response crosses its 200ms threshold, so the latency SLI goes to
+      roughly 1.0 and the 1h window passes 0.144 after about nine minutes. storefront's
+      400ms SLO should break too, because the fan-out cannot be faster than its slowest
+      leg. recs is untouched, which is the point: the dashboards should localise the
+      fault to catalog rather than showing three services all looking equally unhealthy.
+    clusters: [kind, eks]
+    target: catalog
+    inject:
+      kind: chaos-mesh
+      manifest: experiments/latency-catalog.yaml
+    duration_s: 900
+    expect:
+      alert: CatalogLatencySLOBurn
+      sli: catalog-latency
+
+  - id: error-spike-recs
+    title: "80% error rate injected into recs"
+    hypothesis: >-
+      recs fails four requests in five, burning its 99% availability budget at 80x. The
+      1h window crosses 0.144 after about eleven minutes.
+
+      storefront should NOT page: it degrades around a recs failure and serves product
+      pages without recommendations, so its own availability SLI stays flat while recs'
+      collapses. This is the scenario that proves graceful degradation is real rather
+      than a claim in a README - two services, one broken, one alert.
+    clusters: [kind, eks]
+    target: recs
+    inject:
+      kind: fault-api
+      service: recs
+      faults:
+        error_rate: 0.8
+    duration_s: 1200
+    expect:
+      alert: RecsAvailabilitySLOBurn
+      sli: recs-availability
+
+  - id: error-spike-storefront
+    title: "50% error rate injected into storefront"
+    hypothesis: >-
+      The customer-facing SLI breaks directly. At a 99.5% target a 50% error rate burns
+      the budget at 100x, and the 1h window crosses 0.072 after about nine minutes. This
+      is the scenario used to calibrate expected time-to-detect for the others, so it is
+      worth watching the 5m and 1h series cross the threshold at visibly different times
+      on the burn-rate panel.
+    clusters: [kind, eks]
+    target: storefront
+    inject:
+      kind: fault-api
+      service: storefront
+      faults:
+        error_rate: 0.5
+    duration_s: 900
+    expect:
+      alert: StorefrontAvailabilitySLOBurn
+      sli: storefront-availability
+
+  - id: gitops-drift
+    title: "Deployment edited by hand"
+    hypothesis: >-
+      Argo CD's selfHeal should revert a manual replica change within seconds, with no
+      user-visible impact and no alert. Recovery here is measured against the desired
+      state in Git rather than an SLI - the failure being tested is configuration drift,
+      not availability.
+    clusters: [kind, eks]
+    target: recs
+    inject:
+      kind: kubectl
+      command: ["scale", "deployment/recs", "--replicas=5", "-n", "demo"]
+      verify_reverted:
+        resource: deployment/recs
+        namespace: demo
+        jsonpath: "{.spec.replicas}"
+        expected: "2"
+    duration_s: 0
+    expect:
+      alert: null
+      sli: null
+
+  - id: node-drain
+    title: "Worker node drained under load"
+    hypothesis: >-
+      Pod disruption budgets and topology spread should keep every service serving while
+      its pods are evicted and rescheduled onto the remaining node. A brief latency bump
+      is acceptable; a page is not. This is the scenario that tests whether the spread
+      constraints are actually doing anything, and the one most likely to surface a
+      single-replica component nobody thought about.
+    clusters: [kind, eks]
+    target: cluster
+    traffic_probe: storefront
+    inject:
+      kind: script
+      script: experiments/node-drain.sh
+    duration_s: 180
+    expect:
+      alert: null
+      sli: storefront-availability
+
+  - id: az-loss
+    title: "Availability zone lost"
+    hypothesis: >-
+      Every node in one AZ is cordoned and drained at once, halving capacity. Services
+      with replicas in the surviving zone should stay up; anything that had all its
+      replicas in the failed zone will not. Expected to be the ugliest scenario in the
+      suite and the most informative - single-replica Postgres has no zone redundancy,
+      and if it was in the failed zone this becomes a database outage with extra steps.
+    clusters: [eks]
+    target: cluster
+    traffic_probe: storefront
+    inject:
+      kind: script
+      script: experiments/az-loss.sh
+    duration_s: 600
+    expect:
+      # Whether this pages depends on which zone Postgres was in, which is the finding.
+      # Predicted null: the script avoids the Postgres zone, so capacity halves but
+      # nothing should go fully down.
+      alert: null
+      sli: storefront-availability
+
+  - id: canary-abort
+    title: "Deliberately broken version deployed as a canary"
+    hypothesis: >-
+      A canary carrying FAULT_ERROR_RATE=0.5 should be caught by the Rollouts analysis
+      and rolled back automatically. One canary pod in four at a 50% error rate is a
+      12.5% blended error rate - well over the analysis threshold of 5%, and well under
+      what the 1h burn-rate window would need to page. That gap is the entire argument
+      for progressive delivery: the deploy gate catches in minutes what the SLO alert
+      would take an hour to notice, and no human is involved in either case.
+
+      Success is not "no errors". It is "the errors stopped without anyone being paged".
+    clusters: [kind, eks]
+    target: storefront
+    inject:
+      kind: script
+      script: experiments/canary-abort.sh
+    duration_s: 600
+    expect:
+      alert: null
+      sli: storefront-availability

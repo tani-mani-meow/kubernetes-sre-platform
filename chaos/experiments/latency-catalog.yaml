@@ -1,0 +1,36 @@
+# Add 500ms to every packet leaving catalog.
+#
+# Chosen over injecting latency into the application (FAULT_LATENCY_MS) on purpose: this
+# is a network fault, below the application, so catalog's own logs and traces show
+# nothing wrong. Finding it requires correlating storefront's dependency metrics with
+# catalog's server-side latency and noticing the gap between them - which is the skill
+# the observability stack is supposed to support.
+#
+# 500ms is well past catalog's 200ms latency SLO and past storefront's 400ms, so both
+# should burn. recs is untouched, so a working dashboard should localise the fault
+# rather than showing three unhealthy services.
+apiVersion: chaos-mesh.org/v1alpha1
+kind: NetworkChaos
+metadata:
+  name: latency-catalog
+  namespace: demo
+spec:
+  action: delay
+  mode: all
+  selector:
+    namespaces:
+      - demo
+    labelSelectors:
+      app.kubernetes.io/name: catalog
+  delay:
+    latency: "500ms"
+    # Without jitter every request lands in the same histogram bucket, which makes the
+    # latency panels look synthetic and hides how a p95 threshold actually behaves.
+    jitter: "50ms"
+    correlation: "50"
+  direction: to
+  # `duration` is set as a safety net, not as the control: the harness deletes this
+  # object explicitly so the recovery clock starts at a moment it observed. If the
+  # harness dies, this stops the experiment anyway rather than leaving 500ms of latency
+  # injected into the cluster indefinitely.
+  duration: "10m"
