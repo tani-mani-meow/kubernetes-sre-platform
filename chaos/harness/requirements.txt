@@ -1,0 +1,6 @@
+# The harness shells out to kubectl for cluster access and speaks HTTP to Prometheus,
+# Alertmanager and the services' fault endpoints. No Kubernetes client library: kubectl
+# is already required to use this repo, and its kubeconfig handling is one less thing
+# to get wrong.
+httpx==0.28.1
+PyYAML==6.0.3
