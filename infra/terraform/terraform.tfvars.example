@@ -1,0 +1,39 @@
+# Copy to terraform.tfvars and adjust. terraform.tfvars is gitignored at the repo root;
+# *.tfvars.example is not.
+#
+# Every value below is already the default in variables.tf. They are repeated here because
+# the ones worth reconsidering before a capture session should be visible in one place.
+
+region       = "us-east-1"
+cluster_name = "k8s-slo-platform"
+
+# Must match the kind node image minor in infra/kind/kind-config.yaml.
+kubernetes_version = "1.34"
+
+az_count = 2
+
+# ON_DEMAND, not SPOT -- see the reasoning in variables.tf. Flipping this trades about $0.68
+# per session against the possibility of an involuntary node termination landing in the
+# middle of a chaos experiment and quietly invalidating the measurement.
+node_capacity_type  = "ON_DEMAND"
+node_instance_types = ["t3.large"]
+node_desired_size   = 3
+node_min_size       = 2
+node_max_size       = 4
+node_disk_size      = 50
+
+# Empty means no control plane logs to CloudWatch. ["audit", "authenticator"] if a session
+# specifically needs them; audit is the expensive one.
+enabled_cluster_log_types = []
+
+# Worth narrowing at the start of a session:
+#   curl -s ifconfig.me
+# then set the result with /32. Leave as 0.0.0.0/0 on a connection whose address moves.
+cluster_endpoint_public_access_cidrs = ["0.0.0.0/0"]
+
+# Second identity granted cluster-admin, in case the primary one becomes unusable.
+# additional_cluster_admin_arns = ["arn:aws:iam::123456789012:role/SomeOtherRole"]
+
+# extra_tags = {
+#   Session = "2026-09-01-capture-1"
+# }
