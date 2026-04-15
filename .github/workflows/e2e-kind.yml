@@ -1,0 +1,211 @@
+name: e2e
+
+# The question this job answers is narrow on purpose: do the three services and the
+# database actually work together against a real Postgres, and does the platform survive
+# losing a pod. It deliberately does not run Argo CD (see
+# docs/adr/0008-no-argo-cd-in-ci.md) or the observability stack - both would double the
+# runtime to re-test things the unit tests and the kind environment already cover.
+
+on:
+  pull_request:
+    paths:
+      - "app/**"
+      - "gitops/services/**"
+      - ".github/workflows/e2e-kind.yml"
+  push:
+    branches: [main]
+    paths:
+      - "app/**"
+      - "gitops/services/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      NS: demo
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Create a kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: e2e
+          # Single node here, unlike the local 3-node cluster. The multi-node topology
+          # exists for the node-drain scenario, which this job does not run.
+          node_image: kindest/node:v1.34.0
+
+      - name: Build the service images
+        run: |
+          for svc in storefront catalog recs; do
+            docker build \
+              --build-arg "SERVICE=$svc" \
+              --build-arg "GIT_SHA=${GITHUB_SHA::7}" \
+              -t "ghcr.io/${{ github.repository }}/$svc:local" \
+              -f app/Dockerfile app/
+          done
+
+      - name: Load the images into the cluster
+        run: |
+          for svc in storefront catalog recs; do
+            kind load docker-image "ghcr.io/${{ github.repository }}/$svc:local" --name e2e
+          done
+
+      - name: Install the Argo Rollouts controller
+        # storefront is a Rollout, so CI runs the same workload kind as the cluster
+        # rather than a CI-only Deployment variant. Without the controller the Rollout
+        # would be accepted and then never create a pod. CRDs only would not be enough.
+        run: |
+          kubectl create namespace argo-rollouts
+          kubectl apply -n argo-rollouts \
+            -f https://github.com/argoproj/argo-rollouts/releases/download/v1.9.1/install.yaml
+          kubectl -n argo-rollouts rollout status deploy/argo-rollouts --timeout=180s
+
+      - name: Apply the ci overlays
+        run: |
+          kubectl create namespace "$NS"
+          for component in postgres catalog recs storefront; do
+            kubectl apply -k "gitops/services/$component/overlays/ci"
+          done
+
+      - name: Wait for Postgres and the seed job
+        run: |
+          kubectl -n "$NS" rollout status statefulset/postgres --timeout=300s
+          # The seed Job is an Argo CD PostSync hook; under plain kubectl the hook
+          # annotations are inert and it simply runs, so it is waited on directly.
+          kubectl -n "$NS" wait --for=condition=complete job/postgres-seed --timeout=300s \
+            || { kubectl -n "$NS" logs job/postgres-seed --tail=50; exit 1; }
+
+      - name: Wait for the services
+        run: |
+          kubectl -n "$NS" rollout status deploy/catalog --timeout=300s
+          kubectl -n "$NS" rollout status deploy/recs --timeout=300s
+          kubectl -n "$NS" wait --for=condition=available \
+            --timeout=300s rollout/storefront 2>/dev/null \
+            || kubectl -n "$NS" wait --for=jsonpath='{.status.readyReplicas}'=2 \
+                 rollout/storefront --timeout=300s
+
+      - name: Smoke test the full call chain
+        run: |
+          kubectl -n "$NS" port-forward svc/storefront 8080:80 &
+          sleep 5
+
+          echo "--- GET /products (storefront -> catalog -> postgres)"
+          curl -fsS --retry 10 --retry-all-errors --retry-delay 3 \
+            http://localhost:8080/products | tee /tmp/products.json
+          test "$(jq 'length' /tmp/products.json)" -ge 12
+
+          echo "--- GET /products/1 (fan-out to catalog and recs)"
+          curl -fsS http://localhost:8080/products/1 | tee /tmp/product.json
+          test "$(jq -r '.recommendations | length' /tmp/product.json)" -ge 1
+          test "$(jq -r '.recommendations_degraded' /tmp/product.json)" = "false"
+
+          echo "--- POST /orders (writes through to Postgres)"
+          curl -fsS -X POST http://localhost:8080/orders \
+            -H 'content-type: application/json' \
+            -d '{"product_id":1,"quantity":2}' | tee /tmp/order.json
+          test "$(jq -r '.total_cents' /tmp/order.json)" = "25800"
+
+      - name: Metrics are exposed with the labels the SLIs depend on
+        run: |
+          kubectl -n "$NS" port-forward svc/catalog 8081:80 &
+          sleep 3
+          curl -fsS http://localhost:8081/metrics > /tmp/metrics.txt
+          # The SLI queries and every dashboard join on service= and the le= bucket
+          # boundaries. A silent rename here empties every SLO panel, so it is asserted
+          # rather than assumed.
+          grep -q 'http_requests_total{.*service="catalog"' /tmp/metrics.txt
+          grep -q 'http_request_duration_seconds_bucket{.*le="0.2"' /tmp/metrics.txt
+          # Route templates, not raw paths: one series for /products/{product_id}
+          # rather than one per product id.
+          grep -q 'route="/products/{product_id}"' /tmp/metrics.txt
+          ! grep -q 'route="/products/1"' /tmp/metrics.txt
+
+      - name: Chaos smoke - kill a pod and confirm recovery
+        run: |
+          kubectl -n "$NS" port-forward svc/storefront 8080:80 &
+          sleep 3
+
+          # Poll while the catalog pod is deleted. The ci overlay runs one replica, so
+          # some requests WILL fail - this asserts the service comes back on its own,
+          # not that nothing broke. A single-replica pod kill is a real outage; the
+          # multi-replica absorb case is what the kind cluster's chaos suite covers.
+          ( for _ in $(seq 1 90); do
+              curl -fsS -o /dev/null --max-time 2 http://localhost:8080/products \
+                && echo ok >> /tmp/probe.log || echo fail >> /tmp/probe.log
+              sleep 1
+            done ) &
+          probe=$!
+
+          sleep 5
+          kubectl -n "$NS" delete pod -l app.kubernetes.io/name=catalog --wait=false
+          wait $probe
+
+          failures=$(grep -c fail /tmp/probe.log || true)
+          successes=$(grep -c ok /tmp/probe.log || true)
+          echo "probe results: $successes ok, $failures failed"
+
+          # Recovery is the assertion, and the tail is what proves it: the last ten
+          # polls must all have succeeded. The count check is only a floor to catch a
+          # service that never came back at all.
+          test "$successes" -ge 30
+          test "$(tail -10 /tmp/probe.log | grep -c fail || true)" -eq 0
+
+      - name: Chaos smoke - injected faults reach the SLI and probes survive them
+        run: |
+          pod=$(kubectl -n "$NS" get pod -l app.kubernetes.io/name=recs \
+                  -o jsonpath='{.items[0].metadata.name}')
+          kubectl -n "$NS" port-forward "pod/$pod" 8082:8000 &
+          sleep 3
+
+          curl -fsS -X PUT http://localhost:8082/internal/faults \
+            -H 'content-type: application/json' -d '{"error_rate":1.0}'
+
+          # The fault must produce 500s...
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8082/recommendations/1)
+          test "$code" = "500"
+
+          # ...and must NOT break the probes. A fault that failed liveness would get the
+          # pod restarted, and Kubernetes healing it would mask the SLO burn the
+          # experiment exists to measure.
+          curl -fsS http://localhost:8082/healthz > /dev/null
+          curl -fsS http://localhost:8082/metrics > /dev/null
+
+          curl -fsS -X PUT http://localhost:8082/internal/faults \
+            -H 'content-type: application/json' -d '{"reset":true}'
+          curl -fsS http://localhost:8082/recommendations/1 > /dev/null
+
+      - name: Storefront degrades rather than fails when recs is down
+        run: |
+          kubectl -n "$NS" scale deploy/recs --replicas=0
+          kubectl -n "$NS" wait --for=delete pod -l app.kubernetes.io/name=recs --timeout=120s
+
+          kubectl -n "$NS" port-forward svc/storefront 8083:80 &
+          sleep 3
+
+          # The whole "slow dependency" story rests on this: a recs outage costs
+          # recommendations on a product page, not the product page.
+          body=$(curl -fsS --retry 5 --retry-all-errors http://localhost:8083/products/1)
+          echo "$body"
+          test "$(echo "$body" | jq -r '.recommendations_degraded')" = "true"
+          test "$(echo "$body" | jq -r '.name')" = "Mechanical Keyboard"
+
+          kubectl -n "$NS" scale deploy/recs --replicas=1
+
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          kubectl -n "$NS" get all
+          kubectl -n "$NS" get events --sort-by=.lastTimestamp | tail -40
+          kubectl -n "$NS" describe pods | tail -120
+          for svc in storefront catalog recs; do
+            echo "=== $svc ==="
+            kubectl -n "$NS" logs -l "app.kubernetes.io/name=$svc" --tail=60 --all-containers || true
+          done

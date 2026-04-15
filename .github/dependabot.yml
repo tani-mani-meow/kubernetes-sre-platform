@@ -1,0 +1,28 @@
+# Keeps the pinned action versions and the Python dependency ranges current. Weekly is
+# enough: the point is not to chase every release but to avoid discovering a two-year-old
+# CVE in the base image during a capture session.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: pip
+    directory: /app
+    schedule:
+      interval: weekly
+    groups:
+      python:
+        patterns: ["*"]
+
+  - package-ecosystem: pip
+    directory: /chaos/harness
+    schedule:
+      interval: weekly
+    groups:
+      python:
+        patterns: ["*"]

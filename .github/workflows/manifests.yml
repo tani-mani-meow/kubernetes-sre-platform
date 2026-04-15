@@ -1,0 +1,103 @@
+name: manifests
+
+# Everything that can be checked without a cluster: every overlay renders, the
+# generated SLO rules still match their specs, and the seed SQL still matches the
+# migrations it was copied from. All three are drift checks - the failure mode they
+# guard against is silent, showing up as an empty dashboard or a database missing a
+# column rather than as a broken build.
+
+on:
+  pull_request:
+    paths:
+      - "gitops/**"
+      - "app/services/catalog/migrations/**"
+      - "scripts/**"
+      - ".github/workflows/manifests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "gitops/**"
+      - "app/services/catalog/migrations/**"
+      - "scripts/**"
+
+permissions:
+  contents: read
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install kustomize, kubectl and sloth
+        run: |
+          curl -sSfL "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+          sudo mv kustomize /usr/local/bin/
+
+          curl -sSLo kubectl "https://dl.k8s.io/release/$(curl -sSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x kubectl && sudo mv kubectl /usr/local/bin/
+
+          curl -sSLo sloth https://github.com/slok/sloth/releases/download/v0.16.0/sloth-linux-amd64
+          chmod +x sloth && sudo mv sloth /usr/local/bin/
+
+      - name: Validate
+        run: bash scripts/validate.sh
+
+      - name: Lint the rendered manifests
+        # kubeconform checks the rendered objects against the real Kubernetes schemas,
+        # which kustomize does not do - `kustomize build` is happy with a Deployment
+        # whose replicas is a string.
+        run: |
+          curl -sSL https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz \
+            | tar xz kubeconform
+          sudo mv kubeconform /usr/local/bin/
+
+          failed=0
+          for overlay in gitops/services/*/overlays/*; do
+            echo "--- $overlay"
+            kustomize build "$overlay" | kubeconform \
+              -strict -summary -ignore-missing-schemas \
+              -schema-location default \
+              -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+              || failed=1
+          done
+          exit $failed
+
+  terraform:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: hashicorp/setup-terraform@v3
+
+      - name: Format
+        run: terraform -chdir=infra/terraform fmt -check -recursive -diff
+
+      - name: Validate
+        # -backend=false so this needs no AWS credentials. It resolves modules and
+        # type-checks the configuration; it does not talk to AWS and never applies.
+        # Applies happen only from the author's machine on a capture day.
+        run: |
+          terraform -chdir=infra/terraform init -backend=false -input=false
+          terraform -chdir=infra/terraform validate
+
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Lint the workflows
+        # actionlint also runs shellcheck over every `run:` block, which is where most
+        # of this repo's CI logic actually lives.
+        run: |
+          bash <(curl -sSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          ./actionlint -color
+
+      - name: Lint the scripts
+        # -x so shellcheck follows `source scripts/lib.sh` instead of guessing at the
+        # helpers every script depends on.
+        run: shellcheck -x -S warning scripts/*.sh chaos/experiments/*.sh
