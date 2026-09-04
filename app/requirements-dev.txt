@@ -3,6 +3,6 @@
 -r services/catalog/requirements.txt
 -r services/recs/requirements.txt
 
-pytest>=8.3,<9
-pytest-asyncio>=0.24,<1.2
-ruff>=0.8,<0.15
+pytest>=9.1.1,<10
+pytest-asyncio>=1.4.0,<1.5
+ruff>=0.16.5,<0.17
