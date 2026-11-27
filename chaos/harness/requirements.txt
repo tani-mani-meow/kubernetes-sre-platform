@@ -3,4 +3,4 @@
 # is already required to use this repo, and its kubeconfig handling is one less thing
 # to get wrong.
 httpx==0.28.1
-PyYAML==6.0.3
+PyYAML==6.0.4
